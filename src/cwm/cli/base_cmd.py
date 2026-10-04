@@ -1,7 +1,7 @@
 """cwm base - manage the base (underlay) workspace.
 
 Commands:
-- ``update``  pull the tracked repository and rebuild the base workspace
+- ``update``  pull every repository in the default set and rebuild the base workspace
 - ``build``   rebuild the base workspace without pulling
 - ``clean``   remove the base build artifacts (build/, install/, log/)
 - ``status``  show the base workspace state
@@ -58,29 +58,42 @@ def _build_base(config: Config, colcon_args: list[str]) -> None:
 )
 @click.argument("colcon_args", nargs=-1, type=click.UNPROCESSED, shell_complete=suppress_completion)
 def update(no_build: bool, colcon_args: tuple[str, ...]) -> None:
-    """Sync the tracked repository with the remote and rebuild the base workspace.
+    """Pull every repository in the default set and rebuild the base workspace.
 
+    Each repository is pulled independently and reported on its own line; if
+    any pull fails, the build is skipped and the command exits non-zero.
     Extra arguments are forwarded to ``colcon build``.
     """
     try:
         root = find_project_root()
         config = Config.load(root)
 
-        if config.repo is None:
+        if not config.repos:
             raise NoRepoSelectedError(
                 "No repository selected.\n"
-                "Run: cwm repo switch <path>"
+                "Run: cwm repo add <path>"
             )
 
-        repo_path = config.repo_path
-        if not repo_path or not repo_path.exists():
+        failures: list[str] = []
+        for rel, repo_path in config.repo_paths.items():
+            if not repo_path.exists():
+                click.echo(f"  {rel}: " + click.style("not found", fg="red") + f" ({repo_path})")
+                failures.append(rel)
+                continue
+            click.echo(f"Pulling {rel}...")
+            try:
+                git.pull(cwd=repo_path)
+            except CWMError as exc:
+                click.echo(f"  {rel}: " + click.style("pull failed", fg="red"))
+                click.echo(f"    {exc}")
+                failures.append(rel)
+                continue
+            click.echo(f"  {rel}: " + click.style("pulled", fg="green"))
+
+        if failures:
             raise CWMError(
-                f"Tracked repository not found: {repo_path}\n"
-                "Clone your repository into src/ first."
+                f"Pull failed for: {', '.join(failures)}. Base workspace was not rebuilt."
             )
-
-        click.echo(f"Pulling {config.repo}...")
-        git.pull(cwd=repo_path)
         click.echo("  Pull complete.")
 
         if no_build:

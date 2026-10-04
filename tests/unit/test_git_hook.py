@@ -82,7 +82,7 @@ def project(tmp_path: Path) -> Config:
     root.mkdir()
     config = Config(
         underlay="/opt/ros/jazzy",
-        repo="my_repo",
+        repos=["my_repo"],
         project_root=root,
     )
     for d in [

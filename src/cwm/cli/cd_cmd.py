@@ -34,32 +34,43 @@ cwm switch requires shell integration to activate and navigate in one step.
     eval "$(cwm shell-init)"
 
   Then use directly:
-    cwm switch <branch>         # activate + go to workspace (or sole sub-repo)
+    cwm switch <branch>         # activate + go to workspace (or its only repo)
     cwm switch <branch> <repo>  # activate + go to specific sub-repo
 """
 
 
+def _sole_checkout(config: Config, manager: WorktreeStateManager, branch: str) -> str | None:
+    """Return the repo checkout path of *branch* if it has exactly one repo, else None."""
+    try:
+        meta = manager.get_worktree_meta(branch)
+    except CWMError:
+        return None
+    if len(meta.repos) != 1:
+        return None
+    checkout = config.worktree_checkout_path(branch, meta.repo_names[0])
+    return str(checkout) if checkout.exists() else None
+
+
 def _resolve(args: tuple[str, ...], *, auto_subrepo: bool = False) -> str:
-    """Return the resolved absolute path, or raise with an error message."""
+    """Return the resolved absolute path, or raise with an error message.
+
+    With *auto_subrepo*, a worktree target resolves to its repository checkout
+    when the worktree holds exactly one repository (multi-repo worktrees stay
+    at the workspace root).
+    """
     root = find_project_root()
     config = Config.load(root)
     manager = WorktreeStateManager(config)
 
-    # No args → active workspace root (or repo checkout when auto_subrepo)
+    # No args → active workspace root (or sole repo checkout when auto_subrepo)
     if not args:
         ws = os.environ.get("CWM_WORKSPACE")
         if ws:
-            if auto_subrepo:
-                branch = os.environ.get("CWM_WORKTREE")
-                if branch:
-                    try:
-                        meta = manager.get_worktree_meta(branch)
-                        if meta.repo:
-                            checkout = config.worktree_src_path(branch) / meta.repo_name
-                            if checkout.exists():
-                                return str(checkout)
-                    except CWMError:
-                        pass
+            branch = os.environ.get("CWM_WORKTREE")
+            if auto_subrepo and branch:
+                checkout = _sole_checkout(config, manager, branch)
+                if checkout:
+                    return checkout
             return ws
         raise CWMError(
             "No worktree specified. Usage: cwm cd <branch|repo|base>"
@@ -74,28 +85,24 @@ def _resolve(args: tuple[str, ...], *, auto_subrepo: bool = False) -> str:
     # Defer branch list until actually needed
     branches = [m.branch for m in manager.list_worktrees()]
 
-    # Branch match → workspace root (or repo checkout when auto_subrepo) or named repo
+    # Branch match → workspace root (or sole repo checkout) or named repo
     if target in branches:
         ws_path = config.worktree_ws_path(target)
         if len(args) == 1:
             if auto_subrepo:
-                try:
-                    meta = manager.get_worktree_meta(target)
-                    if meta.repo:
-                        checkout = config.worktree_src_path(target) / meta.repo_name
-                        if checkout.exists():
-                            return str(checkout)
-                except CWMError:
-                    pass
+                checkout = _sole_checkout(config, manager, target)
+                if checkout:
+                    return checkout
             return str(ws_path)
         repo_arg = args[1]
         meta = manager.get_worktree_meta(target)
-        if repo_arg not in (meta.repo, meta.repo_name):
+        rel = meta.find_repo(repo_arg)
+        if rel is None:
             raise CWMError(
                 f"Repository '{repo_arg}' not found in worktree '{target}'. "
-                f"Tracked repo: {meta.repo or 'none'}"
+                f"Repos: {', '.join(meta.repo_names) or 'none'}"
             )
-        return str(config.worktree_src_path(target) / meta.repo_name)
+        return str(config.worktree_checkout_path(target, rel))
 
     # Active worktree → repo checkout within it
     ws = os.environ.get("CWM_WORKSPACE")
@@ -104,8 +111,9 @@ def _resolve(args: tuple[str, ...], *, auto_subrepo: bool = False) -> str:
         if branch:
             try:
                 meta = manager.get_worktree_meta(branch)
-                if meta.repo and target in (meta.repo, meta.repo_name):
-                    return str(config.worktree_src_path(branch) / meta.repo_name)
+                rel = meta.find_repo(target)
+                if rel is not None:
+                    return str(config.worktree_checkout_path(branch, rel))
             except CWMError:
                 pass
 
@@ -154,7 +162,7 @@ def switch(branch: str, repo: str | None) -> None:
     Requires shell integration. Run 'eval "$(cwm shell-init)"' first.
 
     \\b
-        cwm switch <branch>         # activate + go to workspace (or sole sub-repo)
+        cwm switch <branch>         # activate + go to workspace (or its only repo)
         cwm switch <branch> <repo>  # activate + go to specific sub-repo
     """
     raise click.ClickException(_SWITCH_HINT.rstrip())

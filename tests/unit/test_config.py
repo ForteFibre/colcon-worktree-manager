@@ -15,7 +15,7 @@ class TestConfigSerialization:
         config = Config(
             underlay="/opt/ros/jazzy",
             worktrees_dir="worktrees",
-            repo="autoware.universe",
+            repos=["autoware.universe", "core/autoware_core"],
             project_root=tmp_path,
         )
         config.save()
@@ -23,13 +23,47 @@ class TestConfigSerialization:
         assert loaded.underlay == config.underlay
         assert loaded.symlink_install == config.symlink_install
         assert loaded.worktrees_dir == config.worktrees_dir
-        assert loaded.repo == "autoware.universe"
+        assert loaded.repos == ["autoware.universe", "core/autoware_core"]
 
     def test_roundtrip_without_repo(self, tmp_path: Path) -> None:
-        config = Config(underlay="/opt/ros/jazzy", repo=None, project_root=tmp_path)
+        config = Config(underlay="/opt/ros/jazzy", repos=[], project_root=tmp_path)
         config.save()
         loaded = Config.load(tmp_path)
-        assert loaded.repo is None
+        assert loaded.repos == []
+
+    def test_v3_single_repo_config_is_migrated(self, tmp_path: Path) -> None:
+        import yaml
+
+        (tmp_path / ".cwm").mkdir()
+        (tmp_path / ".cwm" / "config.yaml").write_text(
+            yaml.safe_dump({
+                "version": 3,
+                "underlay": "/opt/ros/jazzy",
+                "worktrees_dir": "worktrees",
+                "symlink_install": False,
+                "repo": "autoware.universe",
+            })
+        )
+        loaded = Config.load(tmp_path)
+        assert loaded.repos == ["autoware.universe"]
+        assert loaded.symlink_install is False
+        assert loaded.version == 4
+
+        # Saving writes the v4 schema without the legacy key.
+        loaded.save()
+        data = yaml.safe_load((tmp_path / ".cwm" / "config.yaml").read_text())
+        assert data["version"] == 4
+        assert data["repos"] == ["autoware.universe"]
+        assert "repo" not in data
+
+    def test_v3_config_without_repo_migrates_to_empty_set(self, tmp_path: Path) -> None:
+        import yaml
+
+        (tmp_path / ".cwm").mkdir()
+        (tmp_path / ".cwm" / "config.yaml").write_text(
+            yaml.safe_dump({"version": 3, "underlay": "/opt/ros/jazzy"})
+        )
+        assert Config.load(tmp_path).repos == []
 
     def test_derived_paths(self, tmp_path: Path) -> None:
         config = Config(project_root=tmp_path)
@@ -78,12 +112,22 @@ class TestConfigDefaults:
         assert "base_ws" not in data
         assert "sub_repos" not in data
         assert "symlink_install" in data
-        assert data["version"] == 3
+        assert "repo" not in data
+        assert data["version"] == 4
 
-    def test_repo_path_property(self, tmp_path: Path) -> None:
-        config = Config(project_root=tmp_path, repo="autoware.universe")
-        assert config.repo_path == tmp_path / "src" / "autoware.universe"
+    def test_repo_paths_property(self, tmp_path: Path) -> None:
+        config = Config(project_root=tmp_path, repos=["autoware.universe", "core/autoware_core"])
+        assert config.repo_paths == {
+            "autoware.universe": tmp_path / "src" / "autoware.universe",
+            "core/autoware_core": tmp_path / "src" / "core" / "autoware_core",
+        }
 
-    def test_repo_path_none_when_no_repo(self, tmp_path: Path) -> None:
-        config = Config(project_root=tmp_path, repo=None)
-        assert config.repo_path is None
+    def test_repo_paths_empty_when_no_repo(self, tmp_path: Path) -> None:
+        config = Config(project_root=tmp_path, repos=[])
+        assert config.repo_paths == {}
+
+    def test_worktree_checkout_path_uses_basename(self, tmp_path: Path) -> None:
+        config = Config(project_root=tmp_path)
+        assert config.worktree_checkout_path("feat/x", "core/autoware_core") == (
+            tmp_path / "worktrees" / "feat-x_ws" / "src" / "autoware_core"
+        )

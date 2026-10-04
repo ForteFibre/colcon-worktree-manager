@@ -44,7 +44,7 @@ class ColconDiscoveryController:
             sub_dir = self._src / rel
             if not sub_dir.is_dir():
                 continue
-            base_sha = sub_repo_shas.get(rel, "HEAD~1")
+            base_sha = sub_repo_shas.get(rel) or "HEAD~1"
             files = git.diff_name_only(base_sha, cwd=sub_dir)
             changed.extend(f"{rel}/{f}" for f in files)
         return changed

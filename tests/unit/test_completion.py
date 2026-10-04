@@ -81,7 +81,7 @@ class TestCompleteWorktreeBranches:
 class TestCompleteGitBranches:
     def test_returns_matching_branches(self):
         config = MagicMock()
-        config.repo_path = Path("/fake/src/my_repo")
+        config.repo_paths = {"my_repo": Path("/fake/src/my_repo")}
         manager = MagicMock()
 
         with (
@@ -92,6 +92,19 @@ class TestCompleteGitBranches:
             items = complete_git_branches(_ctx(), _param(), "feat")
 
         assert [i.value for i in items] == ["feature-xyz"]
+
+    def test_unions_branches_of_every_default_repo(self):
+        config = MagicMock()
+        config.repo_paths = {"a": Path("/fake/src/a"), "b": Path("/fake/src/b")}
+        branches = {Path("/fake/src/a"): ["feat-a", "main"], Path("/fake/src/b"): ["feat-b", "main"]}
+
+        with (
+            patch.object(completion_mod, "_load_config_and_manager", return_value=(config, MagicMock())),
+            patch("cwm.util.git.list_branches", side_effect=lambda cwd, include_remote: branches[cwd]),
+        ):
+            items = complete_git_branches(_ctx(), _param(), "")
+
+        assert [i.value for i in items] == ["feat-a", "feat-b", "main"]
 
     def test_returns_empty_on_exception(self):
         with patch.object(
@@ -123,3 +136,31 @@ class TestCompleteDistros:
             items = complete_distros(_ctx(), _param(), "")
 
         assert items == []
+
+
+class TestCompleteRepoList:
+    def test_completes_last_segment_of_comma_list(self, tmp_path: Path):
+        from cwm.cli.completion import complete_repo_list
+        from cwm.core.config import Config
+        from tests.conftest import make_git_repo
+
+        config = Config(project_root=tmp_path)
+        for rel in ("repo_a", "repo_b", "group/repo_c"):
+            make_git_repo(config.base_src_path / rel)
+
+        with patch.object(completion_mod, "_load_config_and_manager", return_value=(config, MagicMock())):
+            items = complete_repo_list(_ctx(), _param(), "repo_a,")
+
+        assert [i.value for i in items] == ["repo_a,group/repo_c", "repo_a,repo_b"]
+
+
+class TestCompleteWorktreeRepos:
+    def test_lists_repos_of_branch(self):
+        from cwm.cli.completion import complete_worktree_repos
+
+        manager = MagicMock()
+        manager.get_worktree_meta.return_value.repo_names = ["repo_a", "group/repo_b"]
+        with patch.object(completion_mod, "_load_config_and_manager", return_value=(MagicMock(), manager)):
+            items = complete_worktree_repos(_ctx({"branch": "feat"}), _param(), "g")
+
+        assert [i.value for i in items] == ["group/repo_b"]

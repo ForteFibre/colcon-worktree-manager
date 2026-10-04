@@ -52,6 +52,7 @@ class TestCliHelp:
         assert result.exit_code == 0, result.output
         assert _listed_commands(result.output) == [
             "add",
+            "focus",
             "remove",
             "list",
             "prune",

@@ -42,8 +42,16 @@ class RepoNotFoundError(CWMError):
 
 
 class NoRepoSelectedError(CWMError):
-    """No repository has been selected; run 'cwm repo switch <path>' first."""
+    """No repository has been selected; run 'cwm repo add <path>' or pass --repos."""
 
 
 class BranchNameCollisionError(CWMError):
     """Branch name maps to the same directory as an existing worktree after sanitisation."""
+
+
+class RepoNameCollisionError(CWMError):
+    """Two repositories selected for one worktree share a basename (they would collide under src/)."""
+
+
+class RepoNotInWorktreeError(CWMError):
+    """The named repository is not checked out in the given worktree."""

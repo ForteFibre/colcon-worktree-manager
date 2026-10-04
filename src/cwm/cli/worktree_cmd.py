@@ -10,13 +10,19 @@ from typing import Any, NoReturn
 
 import click
 
-from cwm.cli.completion import complete_git_branches, complete_worktree_branches
+from cwm.cli.completion import (
+    complete_git_branches,
+    complete_repo_list,
+    complete_worktree_branches,
+    complete_worktree_repos,
+)
 from cwm.cli.main import worktree
 from cwm.core.config import Config
-from cwm.core.worktree_state import WorktreeStateManager
+from cwm.core.worktree_state import WorktreeMeta, WorktreeStateManager
 from cwm.errors import CWMError
 from cwm.util import git as gitutil
 from cwm.util.filesystem import find_project_root
+from cwm.util.repos import discover_sub_repos
 
 
 def _load() -> tuple[Config, WorktreeStateManager]:
@@ -34,28 +40,61 @@ def _json_ok(payload: dict[str, Any]) -> None:
     click.echo(json.dumps({"ok": True, **payload}))
 
 
+def _split_repos(value: str | None) -> list[str] | None:
+    """Parse a comma-separated --repos value; None/empty means 'use the default set'."""
+    if not value:
+        return None
+    return [r.strip() for r in value.split(",") if r.strip()] or None
+
+
+def _repo_payload(config: Config, branch: str, meta: WorktreeMeta) -> list[dict[str, Any]]:
+    """Per-repo JSON entries for a worktree."""
+    return [
+        {
+            "repo": rel,
+            "src_path": str(config.worktree_checkout_path(branch, rel)),
+            "base_sha": state.base_sha,
+            "base_branch": state.base_branch,
+        }
+        for rel, state in meta.repos.items()
+    ]
+
+
 @worktree.command()
 @click.argument("branch", shell_complete=complete_git_branches)
+@click.option(
+    "--repos",
+    "repos_opt",
+    default=None,
+    metavar="PATH[,PATH...]",
+    shell_complete=complete_repo_list,
+    help="Comma-separated repositories (relative to src/) to check out. "
+         "Defaults to the project's default set ('cwm repo show').",
+)
 @click.option("--json", "as_json", is_flag=True, help="Output result as JSON.")
-def add(branch: str, as_json: bool) -> None:
-    """Create a new overlay worktree for BRANCH."""
+def add(branch: str, repos_opt: str | None, as_json: bool) -> None:
+    """Create a new overlay worktree for BRANCH.
+
+    Each selected repository is checked out at
+    worktrees/<branch>_ws/src/<repo-basename> on BRANCH: an existing local
+    branch is reused, else origin/BRANCH is tracked if it exists (after a
+    best-effort fetch), else BRANCH is created from the base checkout's HEAD.
+    """
     try:
         config, manager = _load()
-        ws_path = manager.create_worktree(branch)
-        repo_name = Path(config.repo).name if config.repo else ""
-        src_path = config.worktree_src_path(branch) / repo_name
+        ws_path = manager.create_worktree(branch, _split_repos(repos_opt))
+        meta = manager.get_worktree_meta(branch)
 
         if as_json:
             _json_ok({
                 "branch": branch,
                 "ws_path": str(ws_path),
-                "src_path": str(src_path),
-                "repo": config.repo,
+                "repos": _repo_payload(config, branch, meta),
             })
         else:
             click.echo(f"Created worktree workspace: {ws_path}")
-            click.echo(f"  Repo:    {config.repo}")
-            click.echo(f"  Source:  {src_path}")
+            for rel in meta.repos:
+                click.echo(f"  Repo:    {rel}  ->  {config.worktree_checkout_path(branch, rel)}")
             click.echo(f"  Build:   {ws_path / 'build'}")
             click.echo(f"  Install: {ws_path / 'install'}")
             click.echo()
@@ -66,13 +105,79 @@ def add(branch: str, as_json: bool) -> None:
         raise click.ClickException(str(exc)) from exc
 
 
+@worktree.command("focus")
+@click.argument("branch", shell_complete=complete_worktree_branches)
+@click.option(
+    "--add", "to_add", multiple=True, metavar="REPO",
+    shell_complete=complete_repo_list,
+    help="Check out REPO (relative to src/) in the worktree. Repeatable.",
+)
+@click.option(
+    "--remove", "--rm", "to_remove", multiple=True, metavar="REPO",
+    shell_complete=complete_worktree_repos,
+    help="Remove REPO's checkout from the worktree. Repeatable.",
+)
+@click.option("--list", "list_only", is_flag=True, help="List the repositories in the worktree.")
+@click.option("--force", is_flag=True, help="With --remove: discard uncommitted changes.")
+@click.option("--json", "as_json", is_flag=True, help="Output result as JSON.")
+def focus(
+    branch: str,
+    to_add: tuple[str, ...],
+    to_remove: tuple[str, ...],
+    list_only: bool,
+    force: bool,
+    as_json: bool,
+) -> None:
+    """Add or remove repositories in an existing worktree.
+
+    \b
+        cwm worktree focus <branch> --add core/autoware_core
+        cwm worktree focus <branch> --remove autoware_core
+        cwm worktree focus <branch> --list
+
+    Added repositories use the same branch resolution as 'cwm worktree add'.
+    Removing the last repository is refused; use 'cwm worktree remove'.
+    """
+    try:
+        config, manager = _load()
+        added: list[str] = []
+        removed: list[str] = []
+        if to_add:
+            added = manager.add_repos(branch, list(to_add))
+        if to_remove:
+            removed = manager.remove_repos(branch, list(to_remove), force=force)
+        meta = manager.get_worktree_meta(branch)
+
+        if as_json:
+            _json_ok({
+                "branch": branch,
+                "added": added,
+                "removed": removed,
+                "repos": _repo_payload(config, branch, meta),
+            })
+            return
+
+        for rel in added:
+            click.echo(f"Added:   {rel}  ->  {config.worktree_checkout_path(branch, rel)}")
+        for rel in removed:
+            click.echo(f"Removed: {rel}")
+        if list_only or not (added or removed):
+            click.echo(f"Repositories in '{branch}':")
+            for rel in meta.repos:
+                click.echo(f"  {rel}  ->  {config.worktree_checkout_path(branch, rel)}")
+    except CWMError as exc:
+        if as_json:
+            _json_fail(str(exc))
+        raise click.ClickException(str(exc)) from exc
+
+
 @worktree.command("remove")
 @click.argument("branch", shell_complete=complete_worktree_branches)
 @click.option("--force", is_flag=True, help="Force removal even with uncommitted changes.")
-@click.option("--delete-branch", is_flag=True, help="Also delete the git branch after removing the worktree.")
+@click.option("--delete-branch", is_flag=True, help="Also delete the git branch (in every repo) after removing the worktree.")
 @click.option("--json", "as_json", is_flag=True, help="Output result as JSON.")
 def remove(branch: str, force: bool, delete_branch: bool, as_json: bool) -> None:
-    """Remove the overlay worktree for BRANCH."""
+    """Remove the overlay worktree for BRANCH (every repository checkout in it)."""
     try:
         config, manager = _load()
         if not force and not as_json:
@@ -80,6 +185,12 @@ def remove(branch: str, force: bool, delete_branch: bool, as_json: bool) -> None
             click.echo("This will permanently remove:")
             click.echo(f"  Branch:    {branch}")
             click.echo(f"  Workspace: {ws_path}")
+            try:
+                repos = manager.get_worktree_meta(branch).repo_names
+            except CWMError:
+                repos = []
+            if repos:
+                click.echo(f"  Repos:     {', '.join(repos)}")
             if delete_branch:
                 click.echo("  (git branch will also be deleted)")
             click.confirm("Continue?", abort=True)
@@ -109,11 +220,10 @@ def list_worktrees_cmd(as_json: bool) -> None:
                 ws_path = config.worktree_ws_path(meta.branch)
                 items.append({
                     "branch": meta.branch,
-                    "repo": meta.repo,
                     "ws_path": str(ws_path),
                     "exists": ws_path.exists(),
                     "created_at": meta.created_at,
-                    "base_sha": meta.base_sha,
+                    "repos": _repo_payload(config, meta.branch, meta),
                 })
             _json_ok({"worktrees": items})
             return
@@ -124,7 +234,7 @@ def list_worktrees_cmd(as_json: bool) -> None:
         for meta in metas:
             ws_path = config.worktree_ws_path(meta.branch)
             status = "exists" if ws_path.exists() else click.style("missing", fg="red")
-            repo_str = f"  [{meta.repo}]" if meta.repo else ""
+            repo_str = f"  [{', '.join(meta.repo_names)}]" if meta.repos else ""
             click.echo(f"  {meta.branch}  ({status}){repo_str}  created {meta.created_at}")
     except CWMError as exc:
         if as_json:
@@ -247,6 +357,26 @@ def _strip_git_globals(args: list[str]) -> tuple[list[str], bool]:
     return args[i:], retargeting
 
 
+def _repo_from_cwd(config: Config, manager: WorktreeStateManager) -> str | None:
+    """Return the repository (relative to src/) whose checkout contains the cwd.
+
+    Matches the base checkouts under src/ first, then the per-repo checkouts of
+    existing CWM worktrees.  Returns None when the cwd is outside every
+    repository (e.g. the project root), in which case the default set is used.
+    """
+    cwd = Path.cwd().resolve()
+    src = config.base_src_path.resolve()
+    if cwd.is_relative_to(src):
+        for rel in discover_sub_repos(config.base_src_path):
+            if cwd.is_relative_to(config.repo_path(rel).resolve()):
+                return rel
+    for meta in manager.list_worktrees():
+        for rel in meta.repos:
+            if cwd.is_relative_to(config.worktree_checkout_path(meta.branch, rel).resolve()):
+                return rel
+    return None
+
+
 def _hook_add(ctx: click.Context, rest: list[str]) -> None:
     parsed = _parse_git_worktree_add(rest)
     if parsed is None:
@@ -264,9 +394,22 @@ def _hook_add(ctx: click.Context, rest: list[str]) -> None:
             fg="yellow",
         )
 
+    # 'git worktree add' run inside a specific repository targets that
+    # repository: create the CWM worktree with it, or add it to an existing
+    # CWM worktree for the same branch (like 'cwm worktree focus --add').
+    added_to_existing = False
     try:
         config, manager = _load()
-        ws_path = manager.create_worktree(branch)
+        repo = _repo_from_cwd(config, manager)
+        existing = None
+        if config.worktree_meta_path(branch).exists():
+            existing = manager.get_worktree_meta(branch)
+        if existing is not None and repo is not None and repo not in existing.repos:
+            manager.add_repos(branch, [repo])
+            added_to_existing = True
+            ws_path = config.worktree_ws_path(branch)
+        else:
+            ws_path = manager.create_worktree(branch, [repo] if repo else None)
     except CWMError as exc:
         _hook_msg(str(exc), fg="red")
         ctx.exit(1)
@@ -274,9 +417,13 @@ def _hook_add(ctx: click.Context, rest: list[str]) -> None:
     try:
         link_path = manager.register_agent_symlink(branch, requested_path)
     except (CWMError, OSError) as exc:
-        # Roll back the half-created worktree so retry is not blocked.
+        # Roll back only what this call created so a retry is not blocked and
+        # a pre-existing worktree is left intact.
         try:
-            manager.remove_worktree(branch, force=True)
+            if added_to_existing:
+                manager.remove_repos(branch, [repo], force=True)
+            else:
+                manager.remove_worktree(branch, force=True)
         except CWMError:
             pass
         _hook_msg(
@@ -285,17 +432,20 @@ def _hook_add(ctx: click.Context, rest: list[str]) -> None:
         )
         ctx.exit(1)
 
-    repo_name = config.repo_name
-    src_path = ws_path / "src" / repo_name if repo_name else ws_path / "src"
+    meta = manager.get_worktree_meta(branch)
 
-    _hook_msg("Intercepted 'git worktree add'.", fg="green")
+    if added_to_existing:
+        _hook_msg(f"Intercepted 'git worktree add': added '{repo}' to existing worktree.", fg="green")
+    else:
+        _hook_msg("Intercepted 'git worktree add'.", fg="green")
     _hook_msg(f"  Real workspace:  {ws_path}", fg="cyan")
     _hook_msg(
         f"  Symlink at:      {link_path}  "
         "(use this path or the real one - they are equivalent)",
         fg="cyan",
     )
-    _hook_msg(f"  Repo checkout:   {src_path}", fg="cyan")
+    for rel in meta.repos:
+        _hook_msg(f"  Repo checkout:   {config.worktree_checkout_path(branch, rel)}", fg="cyan")
     _hook_msg(
         f"Next: run 'source <(cwm activate {branch})' "
         "to enter the CWM-managed environment.",
@@ -308,6 +458,7 @@ def _hook_list(ctx: click.Context, rest: list[str]) -> None:
     porcelain = "--porcelain" in rest
     try:
         config, manager = _load()
+        metas = manager.list_worktrees()
     except CWMError as exc:
         _hook_msg(str(exc), fg="red")
         ctx.exit(1)
@@ -315,41 +466,49 @@ def _hook_list(ctx: click.Context, rest: list[str]) -> None:
     entries: list[tuple[Path, str, str]] = []  # (path, sha, branch)
     seen_paths: set[str] = set()
 
-    # First, mirror what real git knows by asking the base repository for its
-    # worktree list.  This ensures we surface any worktrees created outside of
-    # CWM (e.g. plain 'git worktree add' before adoption) so agents get a
-    # complete picture.
-    base_repo = config.repo_path
-    if base_repo is not None and base_repo.exists():
+    # First, mirror what real git knows by asking every known base repository
+    # for its worktree list.  This ensures we surface any worktrees created
+    # outside of CWM (e.g. plain 'git worktree add' before adoption) so agents
+    # get a complete picture.
+    for rel in manager.known_repos(metas):
+        base_repo = config.repo_path(rel)
+        if not base_repo.exists():
+            continue
         try:
             infos = gitutil.worktree_list(cwd=base_repo)
         except CWMError:
             infos = []
         for info in infos:
+            key = str(info.path.resolve(strict=False))
+            if key in seen_paths:
+                continue
+            seen_paths.add(key)
             entries.append((info.path, info.head, info.branch or ""))
-            seen_paths.add(str(info.path.resolve(strict=False)))
 
-    # Augment with CWM-managed entries, replacing the workspace path with the
-    # agent-facing symlink when one is registered.
-    for meta in manager.list_worktrees():
+    # Collapse each CWM-managed worktree (one checkout per repo) into a single
+    # entry, replacing the workspace path with the agent-facing symlink when
+    # one is registered.
+    for meta in metas:
         ws_path = config.worktree_ws_path(meta.branch)
-        checkout = ws_path / "src" / meta.repo_name
-        sha = meta.base_sha
-        if checkout.exists():
-            try:
-                sha = gitutil.get_head_sha(cwd=checkout)
-            except CWMError:
-                pass
+        checkouts = [config.worktree_checkout_path(meta.branch, rel) for rel in meta.repos]
+        sha = next(iter(meta.repos.values())).base_sha if meta.repos else ""
+        for checkout in checkouts:
+            if checkout.exists():
+                try:
+                    sha = gitutil.get_head_sha(cwd=checkout)
+                    break
+                except CWMError:
+                    pass
         display_path = (
             Path(meta.agent_symlinks[0]) if meta.agent_symlinks else ws_path
         )
-        # Drop the duplicate entry git worktree list emitted for this checkout
-        # so the agent does not see two rows for the same branch.
-        checkout_resolved = str(checkout.resolve(strict=False))
+        # Drop the per-repo entries git emitted for these checkouts so the
+        # agent sees exactly one row per CWM worktree.
+        checkout_keys = {str(c.resolve(strict=False)) for c in checkouts}
         entries = [
             (p, s, b)
             for (p, s, b) in entries
-            if str(p.resolve(strict=False)) != checkout_resolved
+            if str(p.resolve(strict=False)) not in checkout_keys
         ]
         entries.append((display_path, sha, meta.branch))
 

@@ -39,7 +39,7 @@ def detect(cwd: str | None) -> None:
         "is_cwm": True,
         "project_root": str(root),
         "underlay": config.underlay,
-        "repo": config.repo,
+        "repos": list(config.repos),
         **({"active_worktree": active_worktree} if active_worktree else {}),
     }
 

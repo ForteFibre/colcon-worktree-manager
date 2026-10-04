@@ -11,6 +11,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, PropertyMock, patch
 
 from cwm.core.changeset import compute_changeset
+from cwm.core.worktree_state import RepoState
 
 
 def _mock_config(tmp_path: Path) -> MagicMock:
@@ -27,7 +28,7 @@ class TestComputeChangeset:
              patch("cwm.core.dependency_graph.DependencyGraphAnalyzer.packages",
                    new_callable=PropertyMock, return_value={"a", "b", "c"}), \
              patch("cwm.core.colcon_discovery.ColconDiscoveryController.get_changed_files_meta",
-                   return_value=["repo/a/src/main.cpp"]), \
+                   return_value=["repo/a/src/main.cpp"]) as mock_files, \
              patch("cwm.core.colcon_discovery.ColconDiscoveryController.get_changed_packages",
                    return_value={"a"}), \
              patch("cwm.core.dependency_graph.DependencyGraphAnalyzer.get_reverse_deps",
@@ -35,11 +36,12 @@ class TestComputeChangeset:
              patch("cwm.core.dependency_graph.DependencyGraphAnalyzer.topological_sort",
                    side_effect=sorted), \
              patch("cwm.core.worktree_state.WorktreeMeta.load") as mock_meta:
-            mock_meta.return_value.repo_name = "repo"
-            mock_meta.return_value.base_sha = "abc123"
+            mock_meta.return_value.repos = {"group/repo": RepoState(base_sha="abc123")}
 
             changeset = compute_changeset(config, "feature-x")
 
+        # Repos are diffed by checkout (basename) against their own base SHA.
+        mock_files.assert_called_once_with(["repo"], {"repo": "abc123"})
         assert changeset.package_count == 3
         assert changeset.changed == {"a"}
         assert changeset.affected == {"b"}
@@ -58,8 +60,7 @@ class TestComputeChangeset:
              patch("cwm.core.dependency_graph.DependencyGraphAnalyzer.topological_sort",
                    side_effect=sorted), \
              patch("cwm.core.worktree_state.WorktreeMeta.load") as mock_meta:
-            mock_meta.return_value.repo_name = "repo"
-            mock_meta.return_value.base_sha = "abc123"
+            mock_meta.return_value.repos = {"group/repo": RepoState(base_sha="abc123")}
 
             changeset = compute_changeset(config, "feature-x", no_rdeps=True)
 
@@ -81,8 +82,7 @@ class TestComputeChangeset:
              patch("cwm.core.dependency_graph.DependencyGraphAnalyzer.topological_sort",
                    side_effect=sorted), \
              patch("cwm.core.worktree_state.WorktreeMeta.load") as mock_meta:
-            mock_meta.return_value.repo_name = "repo"
-            mock_meta.return_value.base_sha = "abc123"
+            mock_meta.return_value.repos = {"group/repo": RepoState(base_sha="abc123")}
 
             changeset = compute_changeset(config, "feature-x")
 

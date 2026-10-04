@@ -171,7 +171,7 @@ class TestCwmInit:
         )
         assert result.exit_code == 0, result.output
         config = Config.load(project)
-        assert config.repo == "my_repo"
+        assert config.repos == ["my_repo"]
 
     def test_init_accepts_repo_flag(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -194,7 +194,48 @@ class TestCwmInit:
         )
         assert result.exit_code == 0, result.output
         config = Config.load(project)
-        assert config.repo == "repo_a"
+        assert config.repos == ["repo_a"]
+
+    def test_init_accepts_multiple_repo_flags(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """--repo may be repeated to seed a multi-repo default set."""
+        underlay = tmp_path / "ros"
+        underlay.mkdir()
+
+        project = tmp_path / "ws"
+        project.mkdir()
+        make_git_repo(project / "src" / "repo_a")
+        make_git_repo(project / "src" / "group" / "repo_b")
+        monkeypatch.chdir(project)
+
+        runner = CliRunner()
+        result = runner.invoke(
+            cli,
+            ["init", "--underlay", str(underlay), "--repo", "repo_a", "--repo", "group/repo_b"],
+            catch_exceptions=False,
+        )
+        assert result.exit_code == 0, result.output
+        assert Config.load(project).repos == ["repo_a", "group/repo_b"]
+
+    def test_init_rejects_basename_collision(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        underlay = tmp_path / "ros"
+        underlay.mkdir()
+
+        project = tmp_path / "ws"
+        project.mkdir()
+        make_git_repo(project / "src" / "a" / "dup")
+        make_git_repo(project / "src" / "b" / "dup")
+        monkeypatch.chdir(project)
+
+        runner = CliRunner()
+        result = runner.invoke(
+            cli, ["init", "--underlay", str(underlay), "--repo", "a/dup", "--repo", "b/dup"]
+        )
+        assert result.exit_code != 0
+        assert "basename" in result.output
 
     def test_fresh_init_leaves_repo_unset(self, tmp_path: Path) -> None:
         """Fresh init without src/ leaves repo unset."""
@@ -213,7 +254,7 @@ class TestCwmInit:
             )
             assert result.exit_code == 0, result.output
             config = Config.load(Path.cwd())
-            assert config.repo is None
+            assert config.repos == []
 
     def test_fresh_init_does_not_create_src(self, tmp_path: Path) -> None:
         """Fresh init leaves src/ creation to the user."""

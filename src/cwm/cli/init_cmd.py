@@ -23,12 +23,13 @@ from cwm.util.ros_env import ROS_INSTALL_BASE, detect_system_underlay, list_avai
 )
 @click.option(
     "--repo",
-    "repo_path",
-    default=None,
+    "repo_paths",
+    multiple=True,
     metavar="PATH",
-    help="Repository to track (relative to src/). Auto-detected if omitted.",
+    help="Repository for the default set (relative to src/). Repeatable. "
+         "Auto-detected if src/ holds a single repository.",
 )
-def init(underlay: str, repo_path: str | None) -> None:
+def init(underlay: str, repo_paths: tuple[str, ...]) -> None:
     """Initialise a CWM project in the current directory.
 
     The current directory is treated as the base colcon workspace.
@@ -60,28 +61,32 @@ def init(underlay: str, repo_path: str | None) -> None:
     src_path = project_root / "src"
     has_existing_src = src_path.is_dir() and any(src_path.iterdir())
 
-    # Determine which repo to track
-    selected_repo: str | None = None
-    if repo_path is not None:
+    # Determine the default repository set
+    selected_repos: list[str] = []
+    if repo_paths:
         from cwm.util.repos import validate_repo_path
         from cwm.errors import RepoNotFoundError
-        try:
-            validate_repo_path(src_path, repo_path)
-            selected_repo = repo_path
-        except RepoNotFoundError as exc:
-            raise click.ClickException(str(exc)) from exc
+        for rel in repo_paths:
+            try:
+                validate_repo_path(src_path, rel)
+            except RepoNotFoundError as exc:
+                raise click.ClickException(str(exc)) from exc
+            if rel not in selected_repos:
+                selected_repos.append(rel)
+        _check_unique_basenames(selected_repos)
     elif has_existing_src:
         from cwm.util.repos import discover_sub_repos
         found = discover_sub_repos(src_path)
         if len(found) == 1:
-            selected_repo = next(iter(found))
+            selected_repos = [next(iter(found))]
         elif len(found) > 1:
-            selected_repo = _prompt_repo_selection(found)
+            selected_repos = _prompt_repo_selection(found)
+            _check_unique_basenames(selected_repos)
 
     config = WorktreeStateManager.init_project(
         project_root,
         underlay=underlay,
-        repo=selected_repo,
+        repos=selected_repos,
     )
 
     if has_existing_src:
@@ -90,49 +95,69 @@ def init(underlay: str, repo_path: str | None) -> None:
         click.echo(f"Initialised CWM project at {project_root}")
     click.echo(f"  Underlay:      {config.underlay}")
     click.echo(f"  Worktrees dir: {config.worktrees_path}")
-    if config.repo:
-        click.echo(f"  Tracked repo:  {config.repo}")
+    if config.repos:
+        click.echo(f"  Default repos: {', '.join(config.repos)}")
     click.echo()
     click.echo("Next steps:")
     if has_existing_src:
-        if config.repo is None:
-            click.echo("  0. Select a repository: cwm repo switch <path>")
+        if not config.repos:
+            click.echo("  0. Select repositories: cwm repo add <path>")
         click.echo("  1. Create a worktree:   cwm worktree add <branch>")
         click.echo("  2. Activate:            source <(cwm activate <branch>)")
         click.echo("  3. Build:               cwm ws build")
     else:
         click.echo("  1. Clone your repository into src/")
-        click.echo("  2. Select it:           cwm repo switch <path>")
+        click.echo("  2. Select it:           cwm repo add <path>")
         click.echo("  3. Build the base:      colcon build --symlink-install")
         click.echo("  4. Create a worktree:   cwm worktree add <branch>")
 
 
-def _prompt_repo_selection(found: dict) -> str | None:
-    """Interactively prompt the user to pick one repository from *found*.
+def _check_unique_basenames(repos: list[str]) -> None:
+    """Reject a default set whose repositories would collide under a worktree's src/."""
+    seen: dict[str, str] = {}
+    for rel in repos:
+        name = Path(rel).name
+        if name in seen:
+            raise click.ClickException(
+                f"Repositories '{seen[name]}' and '{rel}' share the basename '{name}' "
+                "and cannot be checked out into the same worktree."
+            )
+        seen[name] = rel
 
-    Returns the selected relative path, or None if non-interactive.
+
+def _prompt_repo_selection(found: dict) -> list[str]:
+    """Interactively prompt the user to pick repositories from *found*.
+
+    Returns the selected relative paths (possibly empty if the user skips).
     """
     available = sorted(found.keys())
     if not sys.stdin.isatty():
-        click.echo("Multiple repositories found in src/. Use --repo to specify one:", err=True)
+        click.echo("Multiple repositories found in src/. Use --repo (repeatable) to specify:", err=True)
         for rel in available:
             click.echo(f"  {rel}", err=True)
         raise click.ClickException(
-            "Cannot auto-select repository in non-interactive mode.\n"
-            "Use: cwm init --repo <path>"
+            "Cannot auto-select repositories in non-interactive mode.\n"
+            "Use: cwm init --repo <path> [--repo <path> ...]"
         )
 
     click.echo("Multiple repositories found in src/:")
     for i, rel in enumerate(available, 1):
         click.echo(f"  [{i}] {rel}")
     click.echo()
-    raw = click.prompt("Select repository (number, or press Enter to skip)")
-    if not raw.strip():
-        return None
-    try:
-        idx = int(raw.strip()) - 1
-        if 0 <= idx < len(available):
-            return available[idx]
-        raise click.ClickException(f"Invalid selection: {raw.strip()}")
-    except ValueError:
-        raise click.ClickException(f"Invalid input: {raw.strip()!r}")
+    raw = click.prompt(
+        "Select repositories (numbers separated by commas/spaces, or press Enter to skip)",
+        default="",
+        show_default=False,
+    )
+    tokens = [t for t in raw.replace(",", " ").split() if t]
+    selected: list[str] = []
+    for token in tokens:
+        try:
+            idx = int(token) - 1
+        except ValueError:
+            raise click.ClickException(f"Invalid input: {token!r}")
+        if not 0 <= idx < len(available):
+            raise click.ClickException(f"Invalid selection: {token}")
+        if available[idx] not in selected:
+            selected.append(available[idx])
+    return selected

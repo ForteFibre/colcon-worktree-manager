@@ -8,7 +8,7 @@ import click
 
 from cwm.cli.base_cmd import _scan_stale_build_dirs
 from cwm.cli.main import cli
-from cwm.cli.status_cmd import _collect_base, _collect_worktrees, _print_base_status
+from cwm.cli.status_cmd import _collect_base, _collect_worktrees, _print_base_status, _repos_label
 from cwm.core.config import Config
 from cwm.errors import CWMError
 from cwm.util.filesystem import find_project_root
@@ -70,6 +70,11 @@ def _print_human(base: dict, worktrees: list[dict]) -> None:
 
         dirty_str = click.style(" dirty", fg="red") if worktree["dirty"] else ""
         ahead_str = f"  +{worktree['ahead']} commit(s)" if worktree["ahead"] else ""
-        repo_str = f"  [{worktree['repo']}]" if worktree.get("repo") else ""
+        missing = [r["repo"] for r in worktree.get("repos") or [] if worktree["exists"] and not r["exists"]]
+        missing_str = (
+            "  " + click.style(f"missing checkout(s): {', '.join(missing)}", fg="red") if missing else ""
+        )
 
-        click.echo(f"  {worktree['branch']}  {status_str}{dirty_str}{ahead_str}{repo_str}")
+        click.echo(
+            f"  {worktree['branch']}  {status_str}{dirty_str}{ahead_str}{_repos_label(worktree)}{missing_str}"
+        )

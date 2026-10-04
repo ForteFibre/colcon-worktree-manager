@@ -35,23 +35,30 @@ def status(as_json: bool) -> None:
         raise click.ClickException(str(exc)) from exc
 
 
+def _is_dirty(path) -> bool:
+    try:
+        return git.is_dirty(cwd=path)
+    except GitError:
+        return False
+
+
 def _collect_base(config: Config) -> dict:
     setup_bash = config.base_install_path / "setup.bash"
     built = setup_bash.exists()
 
-    dirty = False
-    repo_path = config.repo_path
-    if repo_path and repo_path.exists():
-        try:
-            if git.is_dirty(cwd=repo_path):
-                dirty = True
-        except GitError:
-            pass
+    repos = []
+    for rel, repo_path in config.repo_paths.items():
+        exists = repo_path.exists()
+        repos.append({
+            "repo": rel,
+            "exists": exists,
+            "dirty": exists and _is_dirty(repo_path),
+        })
 
     return {
         "built": built,
-        "dirty": dirty,
-        "repo": config.repo,
+        "dirty": any(r["dirty"] for r in repos),
+        "repos": repos,
     }
 
 
@@ -63,40 +70,47 @@ def _collect_worktrees(config: Config, manager) -> list[dict]:
         exists = ws_path.exists()
         built = (config.worktree_install_path(meta.branch) / "local_setup.bash").exists()
 
-        dirty = False
-        ahead = 0
-        if exists and meta.repo:
-            sub_path = config.worktree_src_path(meta.branch) / meta.repo_name
-            if sub_path.is_dir():
+        repos = []
+        for rel, state in meta.repos.items():
+            checkout = config.worktree_checkout_path(meta.branch, rel)
+            present = exists and checkout.is_dir()
+            dirty = present and _is_dirty(checkout)
+            ahead = 0
+            if present and state.base_branch:
                 try:
-                    if git.is_dirty(cwd=sub_path):
-                        dirty = True
+                    ahead = git.commits_ahead(state.base_branch, cwd=checkout)
                 except GitError:
                     pass
-                if meta.base_branch:
-                    try:
-                        ahead = git.commits_ahead(meta.base_branch, cwd=sub_path)
-                    except GitError:
-                        pass
+            repos.append({
+                "repo": rel,
+                "exists": present,
+                "dirty": dirty,
+                "ahead": ahead,
+            })
 
         result.append({
             "branch": meta.branch,
-            "repo": meta.repo,
+            "repos": repos,
             "exists": exists,
             "built": built,
-            "dirty": dirty,
-            "ahead": ahead,
+            "dirty": any(r["dirty"] for r in repos),
+            "ahead": sum(r["ahead"] for r in repos),
             "created_at": meta.created_at,
         })
     return result
+
+
+def _repos_label(entry: dict) -> str:
+    """Render '  [a, b*]' for a status entry; '*' marks a dirty repository."""
+    names = [r["repo"] + ("*" if r.get("dirty") else "") for r in entry.get("repos") or []]
+    return f"  [{', '.join(names)}]" if names else ""
 
 
 def _print_base_status(base: dict) -> None:
     """Print the one-line base workspace status (shared with ``cwm base status``)."""
     built_mark = click.style("built", fg="green") if base["built"] else click.style("not built", fg="yellow")
     dirty_mark = click.style(" dirty", fg="red") if base["dirty"] else ""
-    repo_str = f"  [{base['repo']}]" if base.get("repo") else ""
-    click.echo(f"Base workspace  {built_mark}{dirty_mark}{repo_str}")
+    click.echo(f"Base workspace  {built_mark}{dirty_mark}{_repos_label(base)}")
 
 
 def _print_human(base: dict, worktrees: list[dict]) -> None:
@@ -119,6 +133,4 @@ def _print_human(base: dict, worktrees: list[dict]) -> None:
 
         dirty_str = click.style(" dirty", fg="red") if worktree["dirty"] else ""
         ahead_str = f"  +{worktree['ahead']} commit(s)" if worktree["ahead"] else ""
-        repo_str = f"  [{worktree['repo']}]" if worktree.get("repo") else ""
-
-        click.echo(f"  {worktree['branch']}  {status_str}{dirty_str}{ahead_str}{repo_str}")
+        click.echo(f"  {worktree['branch']}  {status_str}{dirty_str}{ahead_str}{_repos_label(worktree)}")

@@ -30,13 +30,16 @@ def _run(
     *,
     cwd: Path | None = None,
     check: bool = True,
+    timeout: float | None = None,
+    extra_env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run a git command and return the CompletedProcess result.
 
     Sets CWM_GIT_HOOK_DEPTH=1 so the PATH wrapper at .cwm/bin/git transparently
     delegates to real git instead of re-entering 'cwm worktree __git_hook'.
+    A *timeout* expiry is reported as GitError.
     """
-    env = {**os.environ, "CWM_GIT_HOOK_DEPTH": "1"}
+    env = {**os.environ, "CWM_GIT_HOOK_DEPTH": "1", **(extra_env or {})}
     try:
         return subprocess.run(
             ["git", *args],
@@ -45,7 +48,10 @@ def _run(
             text=True,
             check=check,
             env=env,
+            timeout=timeout,
         )
+    except subprocess.TimeoutExpired as exc:
+        raise GitError(f"git {' '.join(args)} timed out after {timeout}s") from exc
     except subprocess.CalledProcessError as exc:
         hint = _friendly_hint(exc.stderr)
         msg = f"git {' '.join(args)} failed (rc={exc.returncode}): {exc.stderr.strip()}"
@@ -143,6 +149,50 @@ def branch_exists(branch: str, *, cwd: Path | None = None) -> bool:
     return result.returncode == 0
 
 
+def remote_branch_exists(branch: str, *, remote: str = "origin", cwd: Path | None = None) -> bool:
+    """Check whether the remote-tracking branch ``<remote>/<branch>`` exists locally."""
+    result = _run(
+        ["rev-parse", "--verify", "--quiet", f"refs/remotes/{remote}/{branch}"],
+        cwd=cwd,
+        check=False,
+    )
+    return result.returncode == 0
+
+
+def has_remote(remote: str = "origin", *, cwd: Path | None = None) -> bool:
+    """Return True if *remote* is configured in the repository at *cwd*."""
+    result = _run(["remote"], cwd=cwd, check=False)
+    return remote in result.stdout.split()
+
+
+# Upper bound for the opportunistic fetch done while resolving a branch.  Keeps
+# 'cwm worktree add' usable offline or behind a slow/unreachable remote.
+FETCH_TIMEOUT_SECONDS = 30.0
+
+
+def try_fetch_branch(branch: str, *, remote: str = "origin", cwd: Path | None = None) -> bool:
+    """Best-effort ``git fetch <remote> <branch>``; return True on success.
+
+    Never raises: a missing remote, a branch that does not exist upstream, an
+    offline machine or a timeout all just yield False.  Credential prompts are
+    disabled so the call cannot block on a TTY.  With the default fetch refspec
+    git also updates ``refs/remotes/<remote>/<branch>``.
+    """
+    if not has_remote(remote, cwd=cwd):
+        return False
+    try:
+        result = _run(
+            ["fetch", "--quiet", remote, branch],
+            cwd=cwd,
+            check=False,
+            timeout=FETCH_TIMEOUT_SECONDS,
+            extra_env={"GIT_TERMINAL_PROMPT": "0"},
+        )
+    except GitError:
+        return False
+    return result.returncode == 0
+
+
 def pull(*, cwd: Path | None = None) -> None:
     """Run ``git pull`` in *cwd*."""
     _run(["pull"], cwd=cwd)
@@ -180,17 +230,24 @@ def worktree_add(
     branch: str,
     *,
     create_branch: bool = True,
+    start_point: str | None = None,
+    track: bool = False,
     cwd: Path | None = None,
 ) -> None:
     """Run ``git worktree add``.
 
     If *create_branch* is True and the branch does not exist yet, it will be
-    created with ``-b``.
+    created with ``-b`` from *start_point* (default: HEAD).  *track* sets the
+    new branch's upstream to *start_point* (used for ``origin/<branch>``).
     """
     exists = branch_exists(branch, cwd=cwd)
     args = ["worktree", "add"]
     if create_branch and not exists:
+        if track:
+            args.append("--track")
         args += ["-b", branch, str(path)]
+        if start_point:
+            args.append(start_point)
     else:
         args += [str(path), branch]
     _run(args, cwd=cwd)

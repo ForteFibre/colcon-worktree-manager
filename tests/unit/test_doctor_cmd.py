@@ -26,7 +26,7 @@ def _patched(tmp_path: Path, *, base: dict, worktrees: list[dict], stale: list):
 def _wt(branch: str, *, exists: bool = True, built: bool = True) -> dict:
     return {
         "branch": branch,
-        "repo": "my_repo",
+        "repos": [{"repo": "my_repo", "exists": exists, "dirty": False, "ahead": 0}],
         "exists": exists,
         "built": built,
         "dirty": False,
@@ -40,7 +40,7 @@ class TestDoctor:
         runner = CliRunner()
         with _patched(
             tmp_path,
-            base={"built": True, "dirty": False, "repo": "my_repo"},
+            base={"built": True, "dirty": False, "repos": [{"repo": "my_repo", "exists": True, "dirty": False}]},
             worktrees=[_wt("feat-x")],
             stale=[(Path("/b/p"), Path("/s/p"))],
         ):
@@ -56,7 +56,7 @@ class TestDoctor:
         runner = CliRunner()
         with _patched(
             tmp_path,
-            base={"built": True, "dirty": False, "repo": "my_repo"},
+            base={"built": True, "dirty": False, "repos": [{"repo": "my_repo", "exists": True, "dirty": False}]},
             worktrees=[_wt("feat-gone", exists=False)],
             stale=[],
         ):
@@ -69,7 +69,7 @@ class TestDoctor:
         runner = CliRunner()
         with _patched(
             tmp_path,
-            base={"built": False, "dirty": True, "repo": "my_repo"},
+            base={"built": False, "dirty": True, "repos": [{"repo": "my_repo", "exists": True, "dirty": False}]},
             worktrees=[_wt("feat-x")],
             stale=[(Path("/b/p"), Path("/s/p")), (Path("/b/q"), Path("/s/q"))],
         ):

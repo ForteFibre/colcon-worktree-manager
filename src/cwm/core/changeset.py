@@ -31,8 +31,9 @@ def compute_changeset(
 ) -> Changeset:
     """Detect changed packages in *branch*'s worktree and their rebuild order.
 
-    Scans the worktree ``src/`` for ROS packages, diffs the tracked repo against
-    the SHA recorded at worktree creation, maps changed files to packages, and
+    Scans the worktree ``src/`` for ROS packages, diffs every repository in the
+    worktree against its own base SHA (recorded when the repo was added), maps
+    the union of changed files to packages, and
     (unless *no_rdeps*) adds reverse dependencies for ABI safety.  The combined
     set is returned in topological build order.
 
@@ -47,9 +48,9 @@ def compute_changeset(
 
     discovery = ColconDiscoveryController(src_path)
     meta = WorktreeMeta.load(config.worktree_meta_path(branch))
-    changed_files = discovery.get_changed_files_meta(
-        [meta.repo_name], {meta.repo_name: meta.base_sha}
-    )
+    # Checkouts live at src/<basename>, so key the diff by checkout name.
+    checkouts = {Config.checkout_name(rel): state.base_sha for rel, state in meta.repos.items()}
+    changed_files = discovery.get_changed_files_meta(list(checkouts), checkouts)
     changed = discovery.get_changed_packages(graph, changed_files)
 
     affected: set[str] = (

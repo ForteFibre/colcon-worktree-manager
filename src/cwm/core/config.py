@@ -15,7 +15,11 @@ WORKTREES_META_DIR = "worktrees"
 CACHE_DIR = "cache"
 COLCON_IGNORE = "COLCON_IGNORE"
 
-CONFIG_VERSION = 3
+CONFIG_VERSION = 4
+# Oldest config version that can still be migrated in memory on load.  v3
+# tracked a single repository ('repo: <path>'); v4 tracks a default set
+# ('repos: [<path>, ...]').
+MIN_MIGRATABLE_VERSION = 3
 
 
 @dataclass
@@ -26,7 +30,9 @@ class Config:
     underlay: str = ""
     symlink_install: bool = True
     worktrees_dir: str = "worktrees"
-    repo: str | None = None  # relative path under src/ of the tracked git repo
+    # Default set of git repositories (paths relative to src/) checked out into
+    # a new worktree when 'cwm worktree add' is run without --repos.
+    repos: list[str] = field(default_factory=list)
 
     # Runtime-only (not serialised)
     project_root: Path = field(default=Path("."), repr=False)
@@ -40,20 +46,28 @@ class Config:
             "underlay": self.underlay,
             "symlink_install": self.symlink_install,
             "worktrees_dir": self.worktrees_dir,
+            "repos": list(self.repos),
         }
-        if self.repo is not None:
-            d["repo"] = self.repo
         return d
 
     @classmethod
     def from_dict(cls, data: dict, project_root: Path) -> Config:
-        """Deserialise from a plain dict."""
+        """Deserialise from a plain dict.
+
+        v3 configs carry a single ``repo`` key; it is migrated to a one-element
+        ``repos`` list.  The migrated config is written back as v4 on the next
+        :meth:`save`.
+        """
+        repos = data.get("repos")
+        if repos is None:
+            legacy = data.get("repo")
+            repos = [legacy] if legacy else []
         return cls(
-            version=data.get("version", CONFIG_VERSION),
+            version=CONFIG_VERSION,
             underlay=data.get("underlay", "/opt/ros/jazzy"),
             symlink_install=data.get("symlink_install", True),
             worktrees_dir=data.get("worktrees_dir", "worktrees"),
-            repo=data.get("repo") or None,
+            repos=[str(r) for r in repos if r],
             project_root=project_root,
         )
 
@@ -76,10 +90,10 @@ class Config:
             data = yaml.safe_load(fh) or {}
 
         version = data.get("version", 1)
-        if version < CONFIG_VERSION:
+        if version < MIN_MIGRATABLE_VERSION:
             raise ConfigVersionError(
                 f"CWM config at {config_path} uses version {version} (current: {CONFIG_VERSION}).\n"
-                "The config schema has changed: a single tracked repository is now required.\n"
+                "The config schema has changed: tracked repositories are now listed explicitly.\n"
                 "Please re-initialise with: cwm init"
             )
 
@@ -91,17 +105,24 @@ class Config:
     def cwm_dir(self) -> Path:
         return self.project_root / CONFIG_DIR
 
-    @property
-    def repo_name(self) -> str:
-        """Basename of the tracked repository path (e.g. 'autoware.universe')."""
-        return Path(self.repo).name if self.repo else ""
+    @staticmethod
+    def checkout_name(repo: str) -> str:
+        """Directory name of *repo*'s checkout inside a worktree's src/.
+
+        Worktrees flatten repositories to their basename
+        (``core/autoware_core`` -> ``src/autoware_core``), so two repositories
+        with the same basename cannot share a worktree.
+        """
+        return Path(repo).name
+
+    def repo_path(self, repo: str) -> Path:
+        """Absolute path to the base checkout of *repo* (relative to src/)."""
+        return self.base_src_path / repo
 
     @property
-    def repo_path(self) -> Path | None:
-        """Absolute path to the tracked git repository, or None if not selected."""
-        if self.repo is None:
-            return None
-        return self.base_src_path / self.repo
+    def repo_paths(self) -> dict[str, Path]:
+        """Mapping of each default repository to its absolute base path."""
+        return {r: self.repo_path(r) for r in self.repos}
 
     @property
     def base_src_path(self) -> Path:
@@ -126,6 +147,10 @@ class Config:
 
     def worktree_src_path(self, branch: str) -> Path:
         return self.worktree_ws_path(branch) / "src"
+
+    def worktree_checkout_path(self, branch: str, repo: str) -> Path:
+        """Return *repo*'s git worktree checkout inside the *branch* workspace."""
+        return self.worktree_src_path(branch) / self.checkout_name(repo)
 
     def worktree_install_path(self, branch: str) -> Path:
         return self.worktree_ws_path(branch) / "install"

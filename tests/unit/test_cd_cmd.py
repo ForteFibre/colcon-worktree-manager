@@ -10,7 +10,7 @@ from click.testing import CliRunner
 
 from cwm.cli.cd_cmd import _resolve, cd, cd_resolve, switch
 from cwm.core.config import Config
-from cwm.core.worktree_state import WorktreeMeta
+from cwm.core.worktree_state import RepoState, WorktreeMeta
 from cwm.errors import CWMError
 
 
@@ -30,13 +30,11 @@ def config(project_root: Path) -> Config:
     return Config.load(project_root)
 
 
-def _make_meta(branch: str, repo: str = "my_repo") -> WorktreeMeta:
+def _make_meta(branch: str, repo: str = "my_repo", *extra: str) -> WorktreeMeta:
     return WorktreeMeta(
         branch=branch,
         created_at="2025-01-01T00:00:00",
-        repo=repo,
-        base_sha="abc123",
-        base_branch="main",
+        repos={r: RepoState(base_sha="abc123", base_branch="main") for r in (repo, *extra)},
     )
 
 

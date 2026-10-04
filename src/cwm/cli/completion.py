@@ -48,13 +48,51 @@ def complete_worktree_branches(
 def complete_git_branches(
     ctx: click.Context, param: click.Parameter, incomplete: str
 ) -> list[CompletionItem]:
-    """Complete with git branch names from the tracked repository."""
+    """Complete with git branch names from every repository in the default set."""
     try:
         from cwm.util.git import list_branches
 
         config, _ = _load_config_and_manager()
-        cwd = config.repo_path or config.project_root
-        return _match(list_branches(cwd=cwd, include_remote=True), incomplete)
+        cwds = list(config.repo_paths.values()) or [config.project_root]
+        branches: set[str] = set()
+        for cwd in cwds:
+            branches.update(list_branches(cwd=cwd, include_remote=True))
+        return _match(sorted(branches), incomplete)
+    except Exception:
+        return []
+
+
+def complete_repo_list(
+    ctx: click.Context, param: click.Parameter, incomplete: str
+) -> list[CompletionItem]:
+    """Complete repository paths under src/, supporting comma-separated lists.
+
+    For ``--repos a,b,<TAB>`` the already-typed prefix is kept and only the
+    last segment is completed.
+    """
+    try:
+        from cwm.util.repos import discover_sub_repos
+
+        config, _ = _load_config_and_manager()
+        head, sep, last = incomplete.rpartition(",")
+        prefix = head + sep
+        chosen = set(head.split(",")) if head else set()
+        repos = [r for r in discover_sub_repos(config.base_src_path) if r not in chosen]
+        return [CompletionItem(prefix + r) for r in repos if r.startswith(last)]
+    except Exception:
+        return []
+
+
+def complete_worktree_repos(
+    ctx: click.Context, param: click.Parameter, incomplete: str
+) -> list[CompletionItem]:
+    """Complete repositories checked out in the worktree named by ctx.params['branch']."""
+    try:
+        _, manager = _load_config_and_manager()
+        branch = ctx.params.get("branch")
+        if not branch:
+            return []
+        return _match(manager.get_worktree_meta(branch).repo_names, incomplete)
     except Exception:
         return []
 
@@ -74,7 +112,7 @@ def complete_distros(
 def complete_cd_targets(
     ctx: click.Context, param: click.Parameter, incomplete: str
 ) -> list[CompletionItem]:
-    """Complete cwm cd first argument: 'base', branch names, and active repo name."""
+    """Complete cwm cd first argument: 'base', branch names, and active repo names."""
     items = ["base"]
     try:
         config, manager = _load_config_and_manager()
@@ -83,8 +121,7 @@ def complete_cd_targets(
         if os.environ.get("CWM_WORKSPACE") and branch:
             try:
                 meta = manager.get_worktree_meta(branch)
-                if meta.repo:
-                    items.append(meta.repo_name)
+                items.extend(config.checkout_name(rel) for rel in meta.repos)
             except Exception:
                 pass
     except Exception:
@@ -95,15 +132,13 @@ def complete_cd_targets(
 def complete_cd_repos(
     ctx: click.Context, param: click.Parameter, incomplete: str
 ) -> list[CompletionItem]:
-    """Complete cwm cd second argument with the repo name for the branch in ctx.params['target']."""
+    """Complete cwm cd second argument with the repo names of the branch in ctx.params['target']."""
     try:
-        _, manager = _load_config_and_manager()
-        target = ctx.params.get("target")
+        config, manager = _load_config_and_manager()
+        target = ctx.params.get("target") or ctx.params.get("branch")
         if not target:
             return []
         meta = manager.get_worktree_meta(target)
-        if meta.repo:
-            return _match([meta.repo_name], incomplete)
-        return []
+        return _match([config.checkout_name(rel) for rel in meta.repos], incomplete)
     except Exception:
         return []

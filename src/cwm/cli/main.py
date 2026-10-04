@@ -152,7 +152,7 @@ def worktree() -> None:
     """Manage worktree overlay workspaces."""
 
 
-worktree.command_order = ["add", "remove", "list", "prune"]
+worktree.command_order = ["add", "focus", "remove", "list", "prune"]
 
 
 @cli.group()

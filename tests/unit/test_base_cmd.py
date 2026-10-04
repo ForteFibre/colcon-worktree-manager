@@ -12,7 +12,7 @@ from cwm.cli.main import cli
 
 
 @contextlib.contextmanager
-def _patched_config(tmp_path: Path, *, underlay: Path | None = None, repo: str | None = "my_repo"):
+def _patched_config(tmp_path: Path, *, underlay: Path | None = None, repos: tuple[str, ...] = ("my_repo",)):
     """Patch find_project_root + Config.load for base commands.
 
     *underlay* defaults to a directory containing a setup.bash so sourced builds
@@ -29,8 +29,8 @@ def _patched_config(tmp_path: Path, *, underlay: Path | None = None, repo: str |
         cfg.project_root = tmp_path
         cfg.underlay = str(underlay)
         cfg.symlink_install = True
-        cfg.repo = repo
-        cfg.repo_path = (tmp_path / "src" / repo) if repo else None
+        cfg.repos = list(repos)
+        cfg.repo_paths = {r: tmp_path / "src" / r for r in repos}
         cfg.base_install_path = tmp_path / "install"
         yield cfg
 
@@ -88,6 +88,55 @@ class TestBaseUpdate:
         cmd = mock_run.call_args[0][0]
         assert cmd[:2] == ["bash", "-c"]
         assert "colcon build" in cmd[2]
+
+    def test_pulls_every_repo_in_default_set(self, tmp_path: Path) -> None:
+        (tmp_path / "src" / "repo_a").mkdir(parents=True)
+        (tmp_path / "src" / "repo_b").mkdir(parents=True)
+        runner = CliRunner()
+        with _patched_config(tmp_path, repos=("repo_a", "repo_b")), \
+             patch("cwm.cli.base_cmd.git.pull") as mock_pull, \
+             patch("cwm.util.colcon_runner.subprocess.run") as mock_run:
+            result = runner.invoke(cli, ["base", "update", "--no-build"])
+
+        assert result.exit_code == 0, result.output
+        assert [c.kwargs["cwd"] for c in mock_pull.call_args_list] == [
+            tmp_path / "src" / "repo_a",
+            tmp_path / "src" / "repo_b",
+        ]
+        assert "repo_a: pulled" in result.output
+        assert "repo_b: pulled" in result.output
+        mock_run.assert_not_called()
+
+    def test_failed_pull_is_reported_per_repo_and_skips_build(self, tmp_path: Path) -> None:
+        from cwm.errors import GitError
+
+        (tmp_path / "src" / "repo_a").mkdir(parents=True)
+        (tmp_path / "src" / "repo_b").mkdir(parents=True)
+
+        def fake_pull(*, cwd: Path) -> None:
+            if cwd.name == "repo_a":
+                raise GitError("diverged")
+
+        runner = CliRunner()
+        with _patched_config(tmp_path, repos=("repo_a", "repo_b")), \
+             patch("cwm.cli.base_cmd.git.pull", side_effect=fake_pull) as mock_pull, \
+             patch("cwm.util.colcon_runner.subprocess.run") as mock_run:
+            result = runner.invoke(cli, ["base", "update"])
+
+        assert result.exit_code != 0
+        # repo_b is still pulled after repo_a fails.
+        assert mock_pull.call_count == 2
+        assert "repo_a: pull failed" in result.output
+        assert "repo_b: pulled" in result.output
+        assert "Pull failed for: repo_a" in result.output
+        mock_run.assert_not_called()
+
+    def test_no_repos_errors(self, tmp_path: Path) -> None:
+        runner = CliRunner()
+        with _patched_config(tmp_path, repos=()):
+            result = runner.invoke(cli, ["base", "update"])
+        assert result.exit_code != 0
+        assert "cwm repo add" in result.output
 
     def test_no_build_skips_colcon(self, tmp_path: Path) -> None:
         (tmp_path / "src" / "my_repo").mkdir(parents=True)

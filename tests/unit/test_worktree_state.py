@@ -28,7 +28,7 @@ def project(tmp_path: Path) -> Config:
 
     config = Config(
         underlay="/opt/ros/jazzy",
-        repo="my_repo",
+        repos=["my_repo"],
         project_root=root,
     )
     for d in [
@@ -66,9 +66,9 @@ class TestCreateWorktree:
 
         meta = WorktreeMeta.load(project.worktree_meta_path("feature-fix"))
         assert meta.branch == "feature-fix"
-        assert meta.repo == "my_repo"
-        assert meta.base_sha != ""
-        assert meta.base_branch == "main"
+        assert list(meta.repos) == ["my_repo"]
+        assert meta.repos["my_repo"].base_sha != ""
+        assert meta.repos["my_repo"].base_branch == "main"
 
     def test_raises_if_already_exists(self, project: Config) -> None:
         manager = WorktreeStateManager(project)
@@ -79,7 +79,7 @@ class TestCreateWorktree:
     def test_raises_when_no_repo_selected(self, tmp_path: Path) -> None:
         root = tmp_path / "no_repo"
         root.mkdir()
-        config = Config(underlay="/opt/ros/jazzy", repo=None, project_root=root)
+        config = Config(underlay="/opt/ros/jazzy", repos=[], project_root=root)
         (config.cwm_dir / "worktrees").mkdir(parents=True)
         manager = WorktreeStateManager(config)
         with pytest.raises(NoRepoSelectedError):
