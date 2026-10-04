@@ -63,6 +63,25 @@ variable is snapshotted, and the generated `deactivate` function restores it
 refuses to run while another worktree is active in the shell; the `cwm`
 function deactivates the current one first.
 
+#### Picking up the overlay after `cwm ws build`
+
+Activation sources the worktree overlay's `install/local_setup.bash` once, and
+colcon's setup scripts only set up the packages installed at that moment. So
+right after `cwm worktree add` (no overlay yet), or when a later build installs
+new packages, the shell would keep resolving them from the base install.
+Activation records a fingerprint of the overlay (`CWM_OVERLAY_FP`: package
+index and hook lists). With shell integration (bash/zsh/fish), the `cwm`
+function checks it after every successful `cwm ws build` and, if the overlay
+changed, re-activates the same worktree: it deactivates (restoring the
+environment from before the first activation) and activates again, so nothing
+is prepended twice, the `ROS_DOMAIN_ID` lease stays the same, and a later
+`deactivate` still restores the original environment. Without shell integration,
+`cwm ws build` prints a hint to re-run `source <(cwm activate <branch>)`
+instead. Rebuilding packages that were already installed needs no refresh. In
+bash/zsh a `cwm ws build` inside a pipeline (`cwm ws build | tee log`) runs in
+a subshell, so it only prints a reminder; the next plain `cwm ws build`
+refreshes.
+
 ### Adopting an existing workspace
 
 If you already have a colcon workspace (e.g. `~/ws/ibis_ws` with `src/autoware.universe/` cloned):

@@ -9,6 +9,32 @@ from cwm.cli.main import cli
 _SHELL_FUNCTION = """\
 # cwm shell integration - allows 'cwm activate', 'cwm cd', and 'cwm switch' to work in-shell.
 # Add to ~/.bashrc:  eval "$(cwm shell-init)"
+
+# Re-activate the current worktree if its overlay install changed since
+# activation (first build, or new packages).  colcon's local_setup.bash only
+# sets up the packages that exist when it is sourced.  The activation script
+# deactivates first, so the environment saved for 'deactivate' stays the one
+# from before the original activation.  The script is generated before
+# anything is undone, so a failure leaves the current activation in place.
+__cwm_refresh_if_stale() {
+    [ -n "${CWM_ACTIVE:-}" ] && [ -n "${CWM_WORKTREE:-}" ] || return 0
+    command cwm __overlay-changed || return 0
+    local __cwm_branch __cwm_script
+    __cwm_branch="$CWM_WORKTREE"
+    # In a subshell (e.g. 'cwm ws build | tee log') re-activating would not
+    # reach the interactive shell; tell the user instead.
+    if [ "${BASH_SUBSHELL:-0}" != 0 ] || [ "${ZSH_SUBSHELL:-0}" != 0 ]; then
+        echo "cwm: overlay install changed; run 'cwm activate $__cwm_branch' to pick it up (ws build ran in a subshell)." >&2
+        return 0
+    fi
+    if ! __cwm_script="$(command cwm activate "$__cwm_branch")"; then
+        echo "cwm: overlay install changed but re-activation failed; run 'cwm activate $__cwm_branch'" >&2
+        return 0
+    fi
+    eval "$__cwm_script" >/dev/null
+    echo "cwm: overlay install changed; re-activated '$__cwm_branch'." >&2
+}
+
 cwm() {
     case "$1" in
         activate)
@@ -45,6 +71,18 @@ cwm() {
                 return $__cwm_ret
             fi
             cd "$__cwm_path"
+            ;;
+        ws)
+            if [ "$2" = build ]; then
+                local __cwm_ret
+                CWM_SHELL_REFRESH=1 command cwm "$@"
+                __cwm_ret=$?
+                if [ $__cwm_ret -eq 0 ]; then
+                    __cwm_refresh_if_stale
+                fi
+                return $__cwm_ret
+            fi
+            command cwm "$@"
             ;;
         *)
             command cwm "$@"
@@ -122,6 +160,25 @@ function __cwm_deactivate_if_active
     end
 end
 
+# Re-activate the current worktree if its overlay install changed since
+# activation (first build, or new packages).  colcon's local_setup.bash only
+# sets up the packages that exist when it is sourced.  Deactivating first
+# keeps the environment saved for 'deactivate' the one from before the
+# original activation (and is required: the fish activation is a diff
+# against the current environment).
+function __cwm_refresh_if_stale
+    set -q CWM_ACTIVE; and set -q CWM_WORKTREE; or return 0
+    command cwm __overlay-changed; or return 0
+    set -l __cwm_branch $CWM_WORKTREE
+    __cwm_deactivate_if_active
+    command cwm activate --shell fish $__cwm_branch | source >/dev/null
+    if test $pipestatus[1] -ne 0
+        echo "cwm: overlay install changed but re-activation failed; run 'cwm activate $__cwm_branch'" >&2
+        return 0
+    end
+    echo "cwm: overlay install changed; re-activated '$__cwm_branch'." >&2
+end
+
 function cwm --description 'Colcon Worktree Manager (shell integration)'
     switch "$argv[1]"
         case activate
@@ -148,6 +205,14 @@ function cwm --description 'Colcon Worktree Manager (shell integration)'
             set -l __cwm_path (command cwm __cd-resolve --auto-subrepo $argv[3..-1])
             or return $status
             cd $__cwm_path
+        case ws
+            if test "$argv[2]" = build
+                CWM_SHELL_REFRESH=1 command cwm $argv
+                set -l __cwm_ret $status
+                test $__cwm_ret -eq 0; and __cwm_refresh_if_stale
+                return $__cwm_ret
+            end
+            command cwm $argv
         case '*'
             command cwm $argv
     end
@@ -239,6 +304,8 @@ def shell_init(shell: str) -> None:
     This defines a 'cwm' shell function that makes 'cwm activate',
     'cwm deactivate', 'cwm cd', and 'cwm switch' work directly in the shell,
     plus a 'git' function that routes 'git worktree' inside a CWM project to
-    CWM.
+    CWM.  After a successful 'cwm ws build' the function re-activates the
+    current worktree when the build created the overlay or added packages, so
+    the new packages are usable without re-activating by hand.
     """
     click.echo(_FISH_FUNCTION if shell == "fish" else _SHELL_FUNCTION, nl=False)
