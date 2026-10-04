@@ -36,6 +36,33 @@ source <(cwm activate <branch>)
 deactivate
 ```
 
+#### fish
+
+Add this to `~/.config/fish/config.fish` instead:
+
+```fish
+cwm shell-init --shell fish | source
+```
+
+It defines the same `cwm` (activate / deactivate / cd / switch) and `git`
+(`git worktree` interception) functions as the bash integration. Without it:
+
+```fish
+cwm activate --shell fish <branch> | source
+deactivate
+```
+
+ROS 2 setup scripts are bash-only, so `cwm activate --shell fish` runs the
+bash activation (underlay, base install, overlay `local_setup.bash`, `.cwm/bin`
+PATH shim, CWM markers, `ROS_DOMAIN_ID`) in a bash subprocess, diffs the
+resulting environment against an identical bash run that sources nothing, and
+emits the difference as fish `set -gx` / `set -e` commands. Every touched
+variable is snapshotted, and the generated `deactivate` function restores it
+(and the prompt). No fish plugin such as `bass` is needed, but `bash` must be on
+`PATH`. Because the script is a diff against the current environment, it
+refuses to run while another worktree is active in the shell; the `cwm`
+function deactivates the current one first.
+
 ### Adopting an existing workspace
 
 If you already have a colcon workspace (e.g. `~/ws/ibis_ws` with `src/autoware.universe/` cloned):
@@ -83,11 +110,11 @@ cwm deactivate
 | Command | Description |
 |---------|-------------|
 | `cwm init [--underlay PATH] [--repo PATH]...` | Initialise a CWM project (underlay auto-detected; repo auto-selected if `src/` has a single git repo; `--repo` is repeatable) |
-| `cwm activate [branch]` | Activate a worktree environment (interactive menu when branch is omitted) |
+| `cwm activate [--shell bash\|zsh\|fish] [branch]` | Activate a worktree environment (interactive menu when branch is omitted) |
 | `cwm deactivate` | Restore the previous environment (provided by shell integration) |
 | `cwm switch <branch>` | Activate a worktree **and** navigate to it in one step |
 | `cwm cd [branch [repo]\|repo\|base]` | Jump to a worktree root or one of its repository checkouts via shell integration |
-| `cwm shell-init` | Print the shell integration function — add `eval "$(cwm shell-init)"` to `.bashrc` |
+| `cwm shell-init [--shell bash\|zsh\|fish]` | Print the shell integration functions — `eval "$(cwm shell-init)"` in `.bashrc`, `cwm shell-init --shell fish \| source` in `config.fish` |
 
 ### Repository management
 
@@ -188,7 +215,7 @@ coding agents (or any tool that defaults to raw `git` knowledge) can drive the
 overlay workflow without breaking the `<branch>_ws/src/<repo>` layout. The
 interception is two-tiered:
 
-1. **Shell function** — `eval "$(cwm shell-init)"` installs a `git()` function
+1. **Shell function** — `eval "$(cwm shell-init)"` (or `cwm shell-init --shell fish | source`) installs a `git` function
    that intercepts `git worktree …` whenever the current directory (or an
    ancestor) contains `.cwm/`. Activation is *not* required.
 2. **PATH shim** — `cwm activate <branch>` prepends `<project>/.cwm/bin` to

@@ -14,6 +14,7 @@ from cwm.cli.main import cli
 from cwm.core.config import Config
 from cwm.errors import CWMError, WorktreeNotFoundError
 from cwm.util.filesystem import find_project_root
+from cwm.util.shell_env import EnvChanges, capture_env_changes, fish_quote
 
 
 # Environment variables that ROS/colcon sourcing will mutate and that the
@@ -38,6 +39,8 @@ cwm activate requires shell integration to mutate the current shell.
 
   Set up once (add to ~/.bashrc):
     eval "$(cwm shell-init)"
+  or, for fish (add to ~/.config/fish/config.fish):
+    cwm shell-init --shell fish | source
 
   Then use directly:
     cwm activate <branch>   # activate a specific worktree
@@ -50,6 +53,8 @@ cwm deactivate requires shell integration to restore the current shell.
 
   Set up once (add to ~/.bashrc):
     eval "$(cwm shell-init)"
+  or, for fish (add to ~/.config/fish/config.fish):
+    cwm shell-init --shell fish | source
 
   Then, after 'cwm activate <branch>':
     cwm deactivate          # restore the previous environment
@@ -63,6 +68,69 @@ def _bash_completion_script() -> str:
         return BashComplete(cli, {}, "cwm", "_CWM_COMPLETE").source()
     except Exception:
         return ""
+
+
+def _activation_core(
+    *,
+    branch: str,
+    project_root: str,
+    workspace: str,
+    underlay: str,
+    base_install: str,
+    overlay_install: str,
+    ros_domain_id: int | None,
+) -> str:
+    """Return the bash statements that establish a worktree's environment.
+
+    Sources the underlay, base install and overlay, prepends the .cwm/bin
+    shim to PATH, and exports the CWM markers and ROS discovery settings.
+    Shared by the bash activation script and the fish activation, which runs
+    it in a bash subprocess and translates the resulting environment diff.
+    """
+    q_branch = shlex.quote(branch)
+    q_root = shlex.quote(project_root)
+    q_workspace = shlex.quote(workspace)
+    q_underlay = shlex.quote(underlay)
+    q_base_install = shlex.quote(base_install)
+    q_overlay_install = shlex.quote(overlay_install)
+
+    if ros_domain_id is not None:
+        domain_block = (
+            f"export ROS_DOMAIN_ID={int(ros_domain_id)}\n"
+            "export ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST"
+        )
+    else:
+        domain_block = "# No ROS_DOMAIN_ID leased for this worktree."
+
+    return f"""\
+# Source ROS 2 distro underlay.
+if [ -f {q_underlay}/setup.bash ]; then
+    source {q_underlay}/setup.bash
+fi
+
+# Source base workspace install.
+if [ -f {q_base_install}/setup.bash ]; then
+    source {q_base_install}/setup.bash
+fi
+
+# Source overlay workspace (skipped silently before first build).
+if [ -f {q_overlay_install}/local_setup.bash ]; then
+    source {q_overlay_install}/local_setup.bash
+fi
+
+# Prepend the CWM bin shim to PATH so that subprocess-level 'git' calls (which
+# bypass the shell function from 'cwm shell-init') are still intercepted.
+export PATH={q_root}/.cwm/bin:${{PATH}}
+
+# Export CWM workspace markers.
+export CWM_ACTIVE=1
+export CWM_PROJECT_ROOT={q_root}
+export CWM_WORKTREE={q_branch}
+export CWM_WORKSPACE={q_workspace}
+
+# Isolate ROS 2 discovery per worktree.
+{domain_block}
+"""
 
 
 def generate_activate_script(
@@ -83,11 +151,7 @@ def generate_activate_script(
     from different worktrees (and other hosts) stay isolated.
     """
     q_branch = shlex.quote(branch)
-    q_root = shlex.quote(project_root)
     q_workspace = shlex.quote(workspace)
-    q_underlay = shlex.quote(underlay)
-    q_base_install = shlex.quote(base_install)
-    q_overlay_install = shlex.quote(overlay_install)
 
     # Build snapshot/restore blocks for the env vars ROS sourcing mutates.
     save_lines = []
@@ -116,15 +180,19 @@ def generate_activate_script(
 
     completion_script = _bash_completion_script()
 
-    if ros_domain_id is not None:
-        domain_block = (
-            f"export ROS_DOMAIN_ID={int(ros_domain_id)}\n"
-            "export ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST"
-        )
-        domain_echo = f'echo "  ROS_DOMAIN_ID: {int(ros_domain_id)} (discovery: LOCALHOST)"\n'
-    else:
-        domain_block = "# No ROS_DOMAIN_ID leased for this worktree."
-        domain_echo = ""
+    core = _activation_core(
+        branch=branch,
+        project_root=project_root,
+        workspace=workspace,
+        underlay=underlay,
+        base_install=base_install,
+        overlay_install=overlay_install,
+        ros_domain_id=ros_domain_id,
+    )
+    domain_echo = (
+        f'echo "  ROS_DOMAIN_ID: {int(ros_domain_id)} (discovery: LOCALHOST)"\n'
+        if ros_domain_id is not None else ""
+    )
 
     return f"""\
 # cwm activation script - source this file, do not execute it directly.
@@ -141,34 +209,7 @@ fi
 {save_block}
 export _CWM_OLD_PS1="${{PS1:-}}"
 
-# Source ROS 2 distro underlay.
-if [ -f {q_underlay}/setup.bash ]; then
-    source {q_underlay}/setup.bash
-fi
-
-# Source base workspace install.
-if [ -f {q_base_install}/setup.bash ]; then
-    source {q_base_install}/setup.bash
-fi
-
-# Source overlay workspace (skipped silently before first build).
-if [ -f {q_overlay_install}/local_setup.bash ]; then
-    source {q_overlay_install}/local_setup.bash
-fi
-
-# Prepend the CWM bin shim to PATH so that subprocess-level 'git' calls (which
-# bypass the shell function from 'cwm shell-init') are still intercepted.
-export PATH={q_root}/.cwm/bin:${{PATH}}
-
-# Export CWM workspace markers.
-export CWM_ACTIVE=1
-export CWM_PROJECT_ROOT={q_root}
-export CWM_WORKTREE={q_branch}
-export CWM_WORKSPACE={q_workspace}
-
-# Isolate ROS 2 discovery per worktree.
-{domain_block}
-
+{core}
 # Modify the shell prompt.
 if [ -n "${{PS1+x}}" ]; then
     export PS1="[cwm:{q_branch}] ${{PS1}}"
@@ -191,6 +232,97 @@ deactivate() {{
 echo ""
 echo "=== CWM Worktree: {q_branch} ==="
 echo "  Workspace: {q_workspace}"
+{domain_echo}echo "  Run 'cwm ws build' to build changed packages."
+echo "  Run 'deactivate' to restore the previous environment."
+echo ""
+"""
+
+
+def generate_fish_activate_script(
+    branch: str,
+    workspace: str,
+    changes: EnvChanges,
+    ros_domain_id: int | None = None,
+) -> str:
+    """Return a fish activation script applying *changes* to the current shell.
+
+    Intended to be consumed via: cwm activate --shell fish <branch> | source
+
+    *changes* is the environment diff produced by running the bash activation
+    core (see :func:`_activation_core`) in a bash subprocess.  Every touched
+    variable is snapshotted first so the generated ``deactivate`` function can
+    restore (or erase) it.  All ``set`` calls use global scope explicitly
+    because the script is usually sourced from inside the ``cwm`` function.
+    """
+    names = " ".join(changes.names)
+    apply_lines = [f"set -gx {name} {fish_quote(value)}" for name, value in changes.set_vars.items()]
+    apply_lines += [f"set -e -g {name}" for name in changes.unset_vars]
+    apply_block = "\n".join(apply_lines) if apply_lines else "# (no environment changes)"
+    q_branch = fish_quote(branch)
+    q_banner = fish_quote(f"=== CWM Worktree: {branch} ===")
+    q_workspace_line = fish_quote(f"  Workspace: {workspace}")
+    domain_echo = (
+        f"echo '  ROS_DOMAIN_ID: {int(ros_domain_id)} (discovery: LOCALHOST)'\n"
+        if ros_domain_id is not None else ""
+    )
+
+    return f"""\
+# cwm activation script (fish) - source it, do not execute it directly.
+# Usage: cwm activate --shell fish {q_branch} | source
+
+# Auto-deactivate any currently active workspace before activating a new one.
+if set -q CWM_ACTIVE; and functions -q deactivate
+    deactivate
+end
+
+# Snapshot every variable this activation changes.
+set -g _CWM_FISH_VARS {names}
+for __cwm_var in $_CWM_FISH_VARS
+    if set -q $__cwm_var
+        set -g _CWM_OLD_$__cwm_var $$__cwm_var
+    else
+        set -g _CWM_WAS_UNSET_$__cwm_var 1
+    end
+end
+set -e __cwm_var
+
+# Apply the environment computed by the bash activation (ROS 2 setup scripts,
+# .cwm/bin PATH shim, CWM markers, ROS_DOMAIN_ID).
+{apply_block}
+
+# Prefix the prompt.
+if functions -q fish_prompt; and not functions -q _cwm_old_fish_prompt
+    functions -c fish_prompt _cwm_old_fish_prompt
+    function fish_prompt
+        printf '[cwm:%s] ' {q_branch}
+        _cwm_old_fish_prompt
+    end
+end
+
+# Define the deactivate function that undoes everything above.
+function deactivate --description 'Restore the environment saved by cwm activate'
+    for __cwm_var in $_CWM_FISH_VARS
+        if set -q _CWM_WAS_UNSET_$__cwm_var
+            set -e -g $__cwm_var
+            set -e -g _CWM_WAS_UNSET_$__cwm_var
+        else if set -q _CWM_OLD_$__cwm_var
+            set -l __cwm_old _CWM_OLD_$__cwm_var
+            set -gx $__cwm_var $$__cwm_old
+            set -e -g $__cwm_old
+        end
+    end
+    set -e -g _CWM_FISH_VARS
+    if functions -q _cwm_old_fish_prompt
+        functions -e fish_prompt
+        functions -c _cwm_old_fish_prompt fish_prompt
+        functions -e _cwm_old_fish_prompt
+    end
+    functions -e deactivate
+end
+
+echo ""
+echo {q_banner}
+echo {q_workspace_line}
 {domain_echo}echo "  Run 'cwm ws build' to build changed packages."
 echo "  Run 'deactivate' to restore the previous environment."
 echo ""
@@ -258,6 +390,23 @@ def _interactive_select(config: Config) -> tuple[str, bool] | None:
     return new_branch, True
 
 
+def _fish_script(paths: dict) -> str:
+    """Compute the activation environment via bash and render it for fish."""
+    if os.environ.get("CWM_ACTIVE"):
+        # The diff is taken against the current environment; with a worktree
+        # already applied it would miss variables both activations share.
+        raise CWMError(
+            "A CWM worktree is already active in this shell. Run 'deactivate' first "
+            "(the 'cwm' function from 'cwm shell-init --shell fish' does this automatically)."
+        )
+    changes, stderr = capture_env_changes(_activation_core(**paths))
+    if stderr.strip():
+        click.echo(stderr.rstrip("\n"), err=True)
+    return generate_fish_activate_script(
+        paths["branch"], paths["workspace"], changes, paths["ros_domain_id"]
+    )
+
+
 def _lease_domain_id(manager, branch: str) -> int | None:
     """Return the worktree's ROS_DOMAIN_ID, leasing one lazily for old worktrees.
 
@@ -271,8 +420,16 @@ def _lease_domain_id(manager, branch: str) -> int | None:
 
 
 @cli.command()
+@click.option(
+    "--shell",
+    "shell",
+    type=click.Choice(["bash", "zsh", "fish"]),
+    default="bash",
+    show_default=True,
+    help="Shell syntax of the emitted script (zsh uses the bash script).",
+)
 @click.argument("branch", required=False, default=None, shell_complete=complete_worktree_branches)
-def activate(branch: str | None) -> None:
+def activate(branch: str | None, shell: str) -> None:
     """Output a shell activation script for the BRANCH worktree.
 
     With a branch name, outputs the activation script directly:
@@ -285,6 +442,12 @@ def activate(branch: str | None) -> None:
 
     \\b
         source <(cwm activate)
+
+    From fish, use 'cwm activate --shell fish <branch> | source' (or the
+    'cwm' function from 'cwm shell-init --shell fish').  The ROS 2 setup
+    scripts are bash-only, so the environment is computed by running the
+    bash activation in a bash subprocess and translated into fish 'set'
+    commands; the current shell must not have another worktree active.
 
     The script sets CWM_ACTIVE, CWM_PROJECT_ROOT, CWM_WORKTREE, CWM_WORKSPACE,
     sources the ROS 2 underlay and workspace overlays, exports the worktree's
@@ -332,8 +495,7 @@ def activate(branch: str | None) -> None:
 
         ws_path = config.worktree_ws_path(branch)
         ros_domain_id = _lease_domain_id(manager, branch)
-
-        script = generate_activate_script(
+        paths = dict(
             branch=branch,
             project_root=str(root),
             workspace=str(ws_path),
@@ -342,6 +504,11 @@ def activate(branch: str | None) -> None:
             overlay_install=str(config.worktree_install_path(branch)),
             ros_domain_id=ros_domain_id,
         )
+
+        if shell == "fish":
+            script = _fish_script(paths)
+        else:
+            script = generate_activate_script(**paths)
 
         click.echo(script, nl=False)
 

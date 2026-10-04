@@ -6,7 +6,6 @@ import json
 
 import click
 
-from cwm.cli.activate_cmd import _lease_domain_id
 from cwm.cli.completion import complete_worktree_branches
 from cwm.cli.main import inspect
 from cwm.core.config import Config
@@ -57,6 +56,7 @@ def env(branch: str) -> None:
         }
         # Same lazy lease as 'cwm activate', so tools that build the
         # environment from this output get the identical ROS_DOMAIN_ID.
+        from cwm.cli.activate_cmd import _lease_domain_id  # avoid import cycle via cli.main
         ros_domain_id = _lease_domain_id(WorktreeStateManager(config), branch)
         if ros_domain_id is not None:
             result["ROS_DOMAIN_ID"] = str(ros_domain_id)
