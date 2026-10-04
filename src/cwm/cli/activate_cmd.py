@@ -12,6 +12,12 @@ import click
 from cwm.cli.completion import complete_worktree_branches
 from cwm.cli.main import cli
 from cwm.core.config import Config
+from cwm.core.overlay_state import (
+    NO_OVERLAY,
+    OVERLAY_FP_VAR,
+    overlay_changed_since_activation,
+    overlay_fingerprint,
+)
 from cwm.errors import CWMError, WorktreeNotFoundError
 from cwm.util.filesystem import find_project_root
 from cwm.util.shell_env import EnvChanges, capture_env_changes, fish_quote
@@ -79,11 +85,15 @@ def _activation_core(
     base_install: str,
     overlay_install: str,
     ros_domain_id: int | None,
+    overlay_fp: str = NO_OVERLAY,
 ) -> str:
     """Return the bash statements that establish a worktree's environment.
 
     Sources the underlay, base install and overlay, prepends the .cwm/bin
     shim to PATH, and exports the CWM markers and ROS discovery settings.
+    *overlay_fp* is the overlay's fingerprint (see
+    :func:`cwm.core.overlay_state.overlay_fingerprint`) recorded so that
+    ``cwm ws build`` can tell whether the shell must re-activate.
     Shared by the bash activation script and the fish activation, which runs
     it in a bash subprocess and translates the resulting environment diff.
     """
@@ -127,6 +137,7 @@ export CWM_ACTIVE=1
 export CWM_PROJECT_ROOT={q_root}
 export CWM_WORKTREE={q_branch}
 export CWM_WORKSPACE={q_workspace}
+export {OVERLAY_FP_VAR}={shlex.quote(overlay_fp)}
 
 # Isolate ROS 2 discovery per worktree.
 {domain_block}
@@ -141,6 +152,7 @@ def generate_activate_script(
     base_install: str,
     overlay_install: str,
     ros_domain_id: int | None = None,
+    overlay_fp: str = NO_OVERLAY,
 ) -> str:
     """Return a bash activation script for the given worktree.
 
@@ -188,6 +200,7 @@ def generate_activate_script(
         base_install=base_install,
         overlay_install=overlay_install,
         ros_domain_id=ros_domain_id,
+        overlay_fp=overlay_fp,
     )
     domain_echo = (
         f'echo "  ROS_DOMAIN_ID: {int(ros_domain_id)} (discovery: LOCALHOST)"\n'
@@ -222,7 +235,7 @@ deactivate() {{
         export PS1="${{_CWM_OLD_PS1}}"
         unset _CWM_OLD_PS1
     fi
-    unset CWM_ACTIVE CWM_PROJECT_ROOT CWM_WORKTREE CWM_WORKSPACE
+    unset CWM_ACTIVE CWM_PROJECT_ROOT CWM_WORKTREE CWM_WORKSPACE {OVERLAY_FP_VAR}
     unset -f deactivate
 }}
 
@@ -452,7 +465,10 @@ def activate(branch: str | None, shell: str) -> None:
     The script sets CWM_ACTIVE, CWM_PROJECT_ROOT, CWM_WORKTREE, CWM_WORKSPACE,
     sources the ROS 2 underlay and workspace overlays, exports the worktree's
     leased ROS_DOMAIN_ID with ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST, and
-    defines a 'deactivate' shell function to undo all changes.
+    defines a 'deactivate' shell function to undo all changes.  It also
+    records the overlay's fingerprint in CWM_OVERLAY_FP so that 'cwm ws build'
+    can detect when the overlay gained packages after activation (the shell
+    integration then re-activates automatically; otherwise a hint is printed).
     """
     if sys.stdout.isatty():
         raise click.ClickException(_TTY_HINT.rstrip())
@@ -495,14 +511,16 @@ def activate(branch: str | None, shell: str) -> None:
 
         ws_path = config.worktree_ws_path(branch)
         ros_domain_id = _lease_domain_id(manager, branch)
+        overlay_install = config.worktree_install_path(branch)
         paths = dict(
             branch=branch,
             project_root=str(root),
             workspace=str(ws_path),
             underlay=config.underlay,
             base_install=str(config.base_install_path),
-            overlay_install=str(config.worktree_install_path(branch)),
+            overlay_install=str(overlay_install),
             ros_domain_id=ros_domain_id,
+            overlay_fp=overlay_fingerprint(overlay_install),
         )
 
         if shell == "fish":
@@ -526,3 +544,21 @@ def deactivate() -> None:
     restore, so this command only prints setup guidance.
     """
     raise click.ClickException(_DEACTIVATE_HINT.rstrip())
+
+
+@cli.command(hidden=True, name="__overlay-changed")
+def overlay_changed() -> None:
+    """Internal: exit 0 if the active worktree's overlay changed since activation.
+
+    Used by the 'cwm' shell function after 'cwm ws build' to decide whether to
+    re-activate.  Exits 1 when nothing changed, no worktree is active, or the
+    activation predates the CWM_OVERLAY_FP marker.
+    """
+    branch = os.environ.get("CWM_WORKTREE")
+    if not os.environ.get("CWM_ACTIVE") or not branch:
+        sys.exit(1)
+    try:
+        config = Config.load(find_project_root())
+    except CWMError:
+        sys.exit(1)
+    sys.exit(0 if overlay_changed_since_activation(config.worktree_install_path(branch)) else 1)

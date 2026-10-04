@@ -2,12 +2,47 @@
 
 from __future__ import annotations
 
+import os
+import shlex
+
 import click
 
 from cwm.cli._workspace import run_workspace_colcon
 from cwm.cli.completion import complete_worktree_branches, suppress_completion
 from cwm.cli.main import ws
+from cwm.core.config import Config
+from cwm.core.overlay_state import overlay_changed_since_activation
 from cwm.errors import CWMError
+from cwm.util.filesystem import find_project_root
+
+#: Set by the 'cwm' shell function, which re-activates by itself after a build.
+SHELL_REFRESH_VAR = "CWM_SHELL_REFRESH"
+
+
+def _stale_activation_hint() -> str | None:
+    """Return a re-activation hint if the active shell's overlay environment is stale.
+
+    The overlay's ``local_setup.bash`` is sourced once at activation, so a
+    build that creates the overlay or installs new packages is not visible in
+    the shell until it re-activates.  Returns None when there is nothing to
+    say: no active worktree, the 'cwm' shell function will refresh the shell
+    itself, or the overlay is unchanged since activation.
+    """
+    branch = os.environ.get("CWM_WORKTREE")
+    if not branch or not os.environ.get("CWM_ACTIVE") or os.environ.get(SHELL_REFRESH_VAR):
+        return None
+    config = Config.load(find_project_root())
+    if not overlay_changed_since_activation(config.worktree_install_path(branch)):
+        return None
+    q_branch = shlex.quote(branch)
+    return (
+        "Note: the overlay install changed since this shell was activated "
+        "(first build or new packages),\n"
+        "      so this shell does not see the new packages yet. Re-activate to pick them up:\n"
+        f"        source <(cwm activate {q_branch})                # bash/zsh\n"
+        f"        cwm activate --shell fish {q_branch} | source   # fish (run 'deactivate' first)\n"
+        "      With shell integration (eval \"$(cwm shell-init)\") this happens automatically."
+    )
 
 
 @ws.command(context_settings={"ignore_unknown_options": True, "allow_extra_args": True})
@@ -63,5 +98,10 @@ def build(
             show_build_order=True,
             done_message="Build complete.",
         )
+        if not dry_run:
+            hint = _stale_activation_hint()
+            if hint:
+                click.echo(err=True)
+                click.echo(hint, err=True)
     except CWMError as exc:
         raise click.ClickException(str(exc)) from exc
