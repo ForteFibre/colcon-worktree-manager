@@ -7,7 +7,7 @@ from pathlib import Path
 
 import yaml
 
-from cwm.errors import ConfigNotFoundError, ConfigVersionError
+from cwm.errors import ConfigNotFoundError, ConfigVersionError, CWMError
 
 CONFIG_DIR = ".cwm"
 CONFIG_FILE = "config.yaml"
@@ -16,6 +16,14 @@ CACHE_DIR = "cache"
 COLCON_IGNORE = "COLCON_IGNORE"
 
 CONFIG_VERSION = 4
+
+# Inclusive range of ROS_DOMAIN_IDs leased to worktrees (one per worktree) so
+# that nodes started from parallel worktrees do not discover each other.
+# Linux-safe domain IDs are 0-101 and 215-232 (higher IDs collide with the
+# ephemeral port range).  ament_cmake_ros's domain_coordinator, used by
+# isolated launch tests, hands out IDs 1-100, so worktrees use 215-232 to stay
+# clear of concurrently running tests.
+DEFAULT_DOMAIN_ID_POOL = (215, 232)
 # Oldest config version that can still be migrated in memory on load.  v3
 # tracked a single repository ('repo: <path>'); v4 tracks a default set
 # ('repos: [<path>, ...]').
@@ -33,6 +41,7 @@ class Config:
     # Default set of git repositories (paths relative to src/) checked out into
     # a new worktree when 'cwm worktree add' is run without --repos.
     repos: list[str] = field(default_factory=list)
+    domain_id_pool: tuple[int, int] = DEFAULT_DOMAIN_ID_POOL
 
     # Runtime-only (not serialised)
     project_root: Path = field(default=Path("."), repr=False)
@@ -47,6 +56,7 @@ class Config:
             "symlink_install": self.symlink_install,
             "worktrees_dir": self.worktrees_dir,
             "repos": list(self.repos),
+            "domain_id_pool": list(self.domain_id_pool),
         }
         return d
 
@@ -68,6 +78,7 @@ class Config:
             symlink_install=data.get("symlink_install", True),
             worktrees_dir=data.get("worktrees_dir", "worktrees"),
             repos=[str(r) for r in repos if r],
+            domain_id_pool=_parse_domain_id_pool(data.get("domain_id_pool")),
             project_root=project_root,
         )
 
@@ -169,3 +180,20 @@ class Config:
     def ensure_worktrees_ignore_marker(self) -> None:
         self.worktrees_path.mkdir(parents=True, exist_ok=True)
         (self.worktrees_path / COLCON_IGNORE).touch()
+
+
+def _parse_domain_id_pool(raw: object) -> tuple[int, int]:
+    """Validate a ``domain_id_pool: [low, high]`` config entry (inclusive)."""
+    if raw is None:
+        return DEFAULT_DOMAIN_ID_POOL
+    if (
+        not isinstance(raw, (list, tuple))
+        or len(raw) != 2
+        or not all(isinstance(v, int) and not isinstance(v, bool) for v in raw)
+        or not 0 <= raw[0] <= raw[1] <= 232
+    ):
+        raise CWMError(
+            f"Invalid domain_id_pool in config: {raw!r}. "
+            "Expected [low, high] with 0 <= low <= high <= 232 (e.g. [215, 232])."
+        )
+    return (raw[0], raw[1])

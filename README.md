@@ -7,6 +7,7 @@ A CLI tool that integrates `git worktree` with `colcon` for parallel ROS 2 devel
 - **Smart diff-based builds** - Automatically detects changed packages via `git diff` and builds only what's needed
 - **ABI-safe reverse dependency resolution** - Rebuilds affected packages via `build`/`build_export` dependencies to prevent ODR violations and runtime crashes; runtime-only (`exec`) dependents are skipped
 - **Environment isolation** - Activates per-worktree environment (ROS overlays, `AMENT_PREFIX_PATH`) via `cwm activate` / `cwm deactivate`
+- **Per-worktree `ROS_DOMAIN_ID`** - Each worktree leases its own domain ID and localhost-only discovery, so nodes from parallel worktrees never see each other
 - **Optimised colcon arguments** - Generates `--packages-select` and `--allow-overriding` flags automatically
 - **Multi-repo worktrees** - One worktree can check out several repositories from `src/` on the same branch; changes across all of them feed a single diff-based build
 
@@ -218,10 +219,30 @@ project, the default set is used.
 The symlink path is recorded in the worktree metadata and removed automatically
 by `cwm worktree remove`.
 
+### ROS_DOMAIN_ID per worktree
+
+`cwm worktree add` leases the lowest free ID from `domain_id_pool` in
+`.cwm/config.yaml` (inclusive, default `[215, 232]`) and records it in the
+worktree metadata; `cwm worktree remove` releases it. `cwm activate` (and
+`cwm inspect env`) then export
+
+```bash
+ROS_DOMAIN_ID=<leased id>
+ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST
+```
+
+and `deactivate` restores the previous values. The default pool is chosen
+because Linux-safe domain IDs are 0–101 and 215–232, and `ament_cmake_ros`'s
+domain coordinator (used by isolated launch tests) hands out 1–100. Worktrees
+created before leasing existed get an ID lazily on their next activation.
+`cwm worktree add` fails with a clear error when the pool is exhausted. The
+leased ID appears in `cwm worktree list` and `cwm ws status` (and their JSON
+as `ros_domain_id`).
+
 ### Concurrency / locking
 
-All worktree lifecycle operations (`add`, `remove`, `prune`, and the agent
-`git worktree` interceptions) are serialized project-wide via a POSIX `flock`
+All worktree lifecycle operations (`add`, `focus`, `remove`, `prune`, domain-ID
+leases, and the agent `git worktree` interceptions) are serialized project-wide via a POSIX `flock`
 on `.cwm/lock`. Concurrent `cwm worktree add` invocations run one after another,
 preventing corruption of `.git/worktrees` and the per-branch metadata. This is
 an intentional Linux/ROS 2 trade-off: build and test operations are deliberately

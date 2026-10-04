@@ -89,6 +89,7 @@ def add(branch: str, repos_opt: str | None, as_json: bool) -> None:
             _json_ok({
                 "branch": branch,
                 "ws_path": str(ws_path),
+                "ros_domain_id": meta.ros_domain_id,
                 "repos": _repo_payload(config, branch, meta),
             })
         else:
@@ -97,6 +98,7 @@ def add(branch: str, repos_opt: str | None, as_json: bool) -> None:
                 click.echo(f"  Repo:    {rel}  ->  {config.worktree_checkout_path(branch, rel)}")
             click.echo(f"  Build:   {ws_path / 'build'}")
             click.echo(f"  Install: {ws_path / 'install'}")
+            click.echo(f"  ROS_DOMAIN_ID: {meta.ros_domain_id}")
             click.echo()
             click.echo(f"Activate with: source <(cwm activate {branch})")
     except CWMError as exc:
@@ -223,6 +225,7 @@ def list_worktrees_cmd(as_json: bool) -> None:
                     "ws_path": str(ws_path),
                     "exists": ws_path.exists(),
                     "created_at": meta.created_at,
+                    "ros_domain_id": meta.ros_domain_id,
                     "repos": _repo_payload(config, meta.branch, meta),
                 })
             _json_ok({"worktrees": items})
@@ -235,7 +238,8 @@ def list_worktrees_cmd(as_json: bool) -> None:
             ws_path = config.worktree_ws_path(meta.branch)
             status = "exists" if ws_path.exists() else click.style("missing", fg="red")
             repo_str = f"  [{', '.join(meta.repo_names)}]" if meta.repos else ""
-            click.echo(f"  {meta.branch}  ({status}){repo_str}  created {meta.created_at}")
+            domain_str = f"  domain {meta.ros_domain_id}" if meta.ros_domain_id is not None else ""
+            click.echo(f"  {meta.branch}  ({status}){repo_str}{domain_str}  created {meta.created_at}")
     except CWMError as exc:
         if as_json:
             _json_fail(str(exc))

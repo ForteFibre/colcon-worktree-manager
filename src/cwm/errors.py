@@ -55,3 +55,7 @@ class RepoNameCollisionError(CWMError):
 
 class RepoNotInWorktreeError(CWMError):
     """The named repository is not checked out in the given worktree."""
+
+
+class DomainIdPoolExhaustedError(CWMError):
+    """Every ROS_DOMAIN_ID in the configured pool is leased by another worktree."""

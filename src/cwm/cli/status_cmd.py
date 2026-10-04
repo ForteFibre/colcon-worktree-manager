@@ -95,9 +95,16 @@ def _collect_worktrees(config: Config, manager) -> list[dict]:
             "built": built,
             "dirty": any(r["dirty"] for r in repos),
             "ahead": sum(r["ahead"] for r in repos),
+            "ros_domain_id": meta.ros_domain_id,
             "created_at": meta.created_at,
         })
     return result
+
+
+def _domain_label(entry: dict) -> str:
+    """Render '  domain 215' for a worktree status entry with a leased ROS_DOMAIN_ID."""
+    domain = entry.get("ros_domain_id")
+    return f"  domain {domain}" if domain is not None else ""
 
 
 def _repos_label(entry: dict) -> str:
@@ -133,4 +140,7 @@ def _print_human(base: dict, worktrees: list[dict]) -> None:
 
         dirty_str = click.style(" dirty", fg="red") if worktree["dirty"] else ""
         ahead_str = f"  +{worktree['ahead']} commit(s)" if worktree["ahead"] else ""
-        click.echo(f"  {worktree['branch']}  {status_str}{dirty_str}{ahead_str}{_repos_label(worktree)}")
+        click.echo(
+            f"  {worktree['branch']}  {status_str}{dirty_str}{ahead_str}"
+            f"{_repos_label(worktree)}{_domain_label(worktree)}"
+        )

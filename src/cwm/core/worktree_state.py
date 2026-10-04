@@ -14,6 +14,7 @@ from cwm.core.config import Config
 from cwm.errors import (
     BranchNameCollisionError,
     CWMError,
+    DomainIdPoolExhaustedError,
     GitError,
     NoRepoSelectedError,
     RepoNameCollisionError,
@@ -159,6 +160,10 @@ class WorktreeMeta:
     # Absolute paths of symlinks created by the git-hook for AI agents.  Tracked
     # so 'cwm worktree remove' can clean them up.
     agent_symlinks: list[str] = field(default_factory=list)
+    # ROS_DOMAIN_ID leased from Config.domain_id_pool; released implicitly when
+    # the metadata file is deleted.  None for worktrees created before leasing
+    # existed (assigned lazily on activation).
+    ros_domain_id: int | None = None
 
     @property
     def repo_names(self) -> list[str]:
@@ -183,6 +188,7 @@ class WorktreeMeta:
                     "created_at": self.created_at,
                     "repos": {rel: state.to_dict() for rel, state in self.repos.items()},
                     "agent_symlinks": list(self.agent_symlinks),
+                    "ros_domain_id": self.ros_domain_id,
                 },
                 fh,
                 default_flow_style=False,
@@ -206,6 +212,7 @@ class WorktreeMeta:
             created_at=data.get("created_at", ""),
             repos=repos,
             agent_symlinks=list(data.get("agent_symlinks", []) or []),
+            ros_domain_id=data.get("ros_domain_id"),
         )
 
 
@@ -390,7 +397,8 @@ class WorktreeStateManager:
 
         with cwm_lock(self._cfg.cwm_dir):
             safe_name = self._cfg.safe_branch_name(branch)
-            for existing in self.list_worktrees():
+            existing_metas = self.list_worktrees()
+            for existing in existing_metas:
                 if existing.branch != branch and self._cfg.safe_branch_name(existing.branch) == safe_name:
                     raise BranchNameCollisionError(
                         f"Branch '{branch}' conflicts with existing worktree '{existing.branch}' "
@@ -399,6 +407,9 @@ class WorktreeStateManager:
 
             if ws_path.exists():
                 raise WorktreeExistsError(f"Worktree workspace already exists: {ws_path}")
+
+            # Lease before touching git so an exhausted pool fails cleanly.
+            domain_id = self._allocate_domain_id(existing_metas)
 
             self._cfg.ensure_worktrees_ignore_marker()
             created: list[tuple[str, bool]] = []
@@ -418,6 +429,7 @@ class WorktreeStateManager:
                     branch=branch,
                     created_at=datetime.now(timezone.utc).isoformat(),
                     repos=states,
+                    ros_domain_id=domain_id,
                 ).save(meta_path)
             except BaseException:
                 self._rollback_checkouts(branch, created)
@@ -426,6 +438,37 @@ class WorktreeStateManager:
                 raise
 
         return ws_path
+
+    # -- ROS_DOMAIN_ID leases --------------------------------------------------
+
+    def _allocate_domain_id(self, metas: list[WorktreeMeta]) -> int:
+        """Return the lowest pool ID not leased by any of *metas* (caller holds the lock)."""
+        low, high = self._cfg.domain_id_pool
+        leased = {m.ros_domain_id for m in metas if m.ros_domain_id is not None}
+        for candidate in range(low, high + 1):
+            if candidate not in leased:
+                return candidate
+        raise DomainIdPoolExhaustedError(
+            f"No free ROS_DOMAIN_ID in pool {low}-{high}: all {high - low + 1} IDs are "
+            "leased by existing worktrees. Remove an unused worktree "
+            "('cwm worktree remove <branch>') or widen 'domain_id_pool' in .cwm/config.yaml."
+        )
+
+    def ensure_domain_id(self, branch: str) -> int:
+        """Return *branch*'s ROS_DOMAIN_ID, leasing one now if it has none.
+
+        Worktrees created before leasing existed have no ID; they get the
+        lowest free one on first activation.  Takes the lock itself, so it
+        must not be called from another lifecycle method.
+        """
+        with cwm_lock(self._cfg.cwm_dir):
+            meta = self.get_worktree_meta(branch)
+            if meta.ros_domain_id is not None:
+                return meta.ros_domain_id
+            others = [m for m in self.list_worktrees() if m.branch != branch]
+            meta.ros_domain_id = self._allocate_domain_id(others)
+            meta.save(self._cfg.worktree_meta_path(branch))
+            return meta.ros_domain_id
 
     def add_repos(self, branch: str, repos: list[str]) -> list[str]:
         """Add *repos* to the existing worktree for *branch* (``focus --add``).

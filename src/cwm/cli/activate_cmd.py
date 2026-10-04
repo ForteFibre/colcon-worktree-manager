@@ -12,7 +12,7 @@ import click
 from cwm.cli.completion import complete_worktree_branches
 from cwm.cli.main import cli
 from cwm.core.config import Config
-from cwm.errors import CWMError
+from cwm.errors import CWMError, WorktreeNotFoundError
 from cwm.util.filesystem import find_project_root
 
 
@@ -29,6 +29,8 @@ _SNAPSHOT_VARS = (
     "ROS_VERSION",
     "ROS_PYTHON_VERSION",
     "ROS_LOCALHOST_ONLY",
+    "ROS_DOMAIN_ID",
+    "ROS_AUTOMATIC_DISCOVERY_RANGE",
 )
 
 _TTY_HINT = """\
@@ -70,10 +72,15 @@ def generate_activate_script(
     underlay: str,
     base_install: str,
     overlay_install: str,
+    ros_domain_id: int | None = None,
 ) -> str:
     """Return a bash activation script for the given worktree.
 
     Intended to be consumed via: source <(cwm activate <branch>)
+
+    *ros_domain_id* is the worktree's leased ROS_DOMAIN_ID; when given, it is
+    exported together with ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST so nodes
+    from different worktrees (and other hosts) stay isolated.
     """
     q_branch = shlex.quote(branch)
     q_root = shlex.quote(project_root)
@@ -108,6 +115,16 @@ def generate_activate_script(
     restore_block = "\n".join(restore_lines)
 
     completion_script = _bash_completion_script()
+
+    if ros_domain_id is not None:
+        domain_block = (
+            f"export ROS_DOMAIN_ID={int(ros_domain_id)}\n"
+            "export ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST"
+        )
+        domain_echo = f'echo "  ROS_DOMAIN_ID: {int(ros_domain_id)} (discovery: LOCALHOST)"\n'
+    else:
+        domain_block = "# No ROS_DOMAIN_ID leased for this worktree."
+        domain_echo = ""
 
     return f"""\
 # cwm activation script - source this file, do not execute it directly.
@@ -149,6 +166,9 @@ export CWM_PROJECT_ROOT={q_root}
 export CWM_WORKTREE={q_branch}
 export CWM_WORKSPACE={q_workspace}
 
+# Isolate ROS 2 discovery per worktree.
+{domain_block}
+
 # Modify the shell prompt.
 if [ -n "${{PS1+x}}" ]; then
     export PS1="[cwm:{q_branch}] ${{PS1}}"
@@ -171,34 +191,10 @@ deactivate() {{
 echo ""
 echo "=== CWM Worktree: {q_branch} ==="
 echo "  Workspace: {q_workspace}"
-echo "  Run 'cwm ws build' to build changed packages."
+{domain_echo}echo "  Run 'cwm ws build' to build changed packages."
 echo "  Run 'deactivate' to restore the previous environment."
 echo ""
 """
-
-
-def generate_create_and_activate_script(
-    branch: str,
-    project_root: str,
-    workspace: str,
-    underlay: str,
-    base_install: str,
-    overlay_install: str,
-) -> str:
-    """Return a bash script that creates a worktree then activates it."""
-    q_branch = shlex.quote(branch)
-    activate_script = generate_activate_script(
-        branch=branch,
-        project_root=project_root,
-        workspace=workspace,
-        underlay=underlay,
-        base_install=base_install,
-        overlay_install=overlay_install,
-    )
-    return f"""\
-# Create the worktree, then activate it.
-cwm worktree add {q_branch} || exit 1
-{activate_script}"""
 
 
 def _list_existing_worktrees(config: Config) -> list[str]:
@@ -262,6 +258,18 @@ def _interactive_select(config: Config) -> tuple[str, bool] | None:
     return new_branch, True
 
 
+def _lease_domain_id(manager, branch: str) -> int | None:
+    """Return the worktree's ROS_DOMAIN_ID, leasing one lazily for old worktrees.
+
+    Returns None when the worktree has no metadata (workspace adopted or
+    metadata deleted by hand); activation then proceeds without a domain ID.
+    """
+    try:
+        return manager.ensure_domain_id(branch)
+    except WorktreeNotFoundError:
+        return None
+
+
 @cli.command()
 @click.argument("branch", required=False, default=None, shell_complete=complete_worktree_branches)
 def activate(branch: str | None) -> None:
@@ -279,8 +287,9 @@ def activate(branch: str | None) -> None:
         source <(cwm activate)
 
     The script sets CWM_ACTIVE, CWM_PROJECT_ROOT, CWM_WORKTREE, CWM_WORKSPACE,
-    sources the ROS 2 underlay and workspace overlays, and defines a
-    'deactivate' shell function to undo all changes.
+    sources the ROS 2 underlay and workspace overlays, exports the worktree's
+    leased ROS_DOMAIN_ID with ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST, and
+    defines a 'deactivate' shell function to undo all changes.
     """
     if sys.stdout.isatty():
         raise click.ClickException(_TTY_HINT.rstrip())
@@ -313,26 +322,26 @@ def activate(branch: str | None) -> None:
                     f"Create it first with: cwm worktree add {branch}"
                 )
 
-        ws_path = config.worktree_ws_path(branch)
-
+        from cwm.core.worktree_state import WorktreeStateManager
+        manager = WorktreeStateManager(config)
         if is_new:
-            script = generate_create_and_activate_script(
-                branch=branch,
-                project_root=str(root),
-                workspace=str(ws_path),
-                underlay=config.underlay,
-                base_install=str(config.base_install_path),
-                overlay_install=str(config.worktree_install_path(branch)),
-            )
-        else:
-            script = generate_activate_script(
-                branch=branch,
-                project_root=str(root),
-                workspace=str(ws_path),
-                underlay=config.underlay,
-                base_install=str(config.base_install_path),
-                overlay_install=str(config.worktree_install_path(branch)),
-            )
+            # Create here (not in the emitted script) so the leased
+            # ROS_DOMAIN_ID is known when the script is rendered.
+            ws_created = manager.create_worktree(branch)
+            click.echo(f"Created worktree workspace: {ws_created}", err=True)
+
+        ws_path = config.worktree_ws_path(branch)
+        ros_domain_id = _lease_domain_id(manager, branch)
+
+        script = generate_activate_script(
+            branch=branch,
+            project_root=str(root),
+            workspace=str(ws_path),
+            underlay=config.underlay,
+            base_install=str(config.base_install_path),
+            overlay_install=str(config.worktree_install_path(branch)),
+            ros_domain_id=ros_domain_id,
+        )
 
         click.echo(script, nl=False)
 

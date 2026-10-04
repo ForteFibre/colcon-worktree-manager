@@ -8,7 +8,13 @@ import click
 
 from cwm.cli.base_cmd import _scan_stale_build_dirs
 from cwm.cli.main import cli
-from cwm.cli.status_cmd import _collect_base, _collect_worktrees, _print_base_status, _repos_label
+from cwm.cli.status_cmd import (
+    _collect_base,
+    _collect_worktrees,
+    _domain_label,
+    _print_base_status,
+    _repos_label,
+)
 from cwm.core.config import Config
 from cwm.errors import CWMError
 from cwm.util.filesystem import find_project_root
@@ -76,5 +82,6 @@ def _print_human(base: dict, worktrees: list[dict]) -> None:
         )
 
         click.echo(
-            f"  {worktree['branch']}  {status_str}{dirty_str}{ahead_str}{_repos_label(worktree)}{missing_str}"
+            f"  {worktree['branch']}  {status_str}{dirty_str}{ahead_str}"
+            f"{_repos_label(worktree)}{_domain_label(worktree)}{missing_str}"
         )
