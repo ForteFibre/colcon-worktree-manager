@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import subprocess
 from pathlib import Path
 from typing import Any, NoReturn
 
@@ -361,6 +362,89 @@ def _strip_git_globals(args: list[str]) -> tuple[list[str], bool]:
     return args[i:], retargeting
 
 
+def _git_target_dir(args: list[str]) -> Path:
+    """Return the directory *args* (a full git argv) would make git operate on.
+
+    Applies leading '-C <path>' options cumulatively, like git does, and treats
+    '--work-tree'/'--git-dir' values as the target.  Relative values resolve
+    against the directory selected so far.
+    """
+    target = Path.cwd()
+    i = 0
+    while i < len(args) and args[i].startswith("-"):
+        name, eq, inline = args[i].partition("=")
+        value: str | None = inline if eq else None
+        if not eq and args[i] in _GIT_GLOBAL_VALUE_OPTS:
+            value = args[i + 1] if i + 1 < len(args) else None
+            i += 2
+        else:
+            i += 1
+        if name in _GIT_RETARGET_OPTS and value:
+            target = target / value
+    return target.resolve()
+
+
+def _outside_project(args: list[str]) -> bool:
+    """True when the git invocation belongs to a repository outside the CWM project.
+
+    The PATH shim installed by 'cwm activate' sees every 'git worktree' call made
+    from the activated shell, including calls for unrelated repositories (other
+    tools' own worktrees, a parent monorepo).  Those must reach real git.
+
+    A target directory that is not inside any git repository stays with CWM, as
+    does 'remove <path>' for a path that resolves into the project: agents may
+    remove the agent symlink of a CWM worktree from anywhere.
+    """
+    try:
+        root = find_project_root().resolve()
+    except CWMError:
+        return True
+    target = _git_target_dir(args)
+    if target.is_relative_to(root):
+        return False
+    rest, _ = _strip_git_globals(args)
+    if rest[:2] == ["worktree", "remove"]:
+        paths = [a for a in rest[2:] if not a.startswith("-")]
+        if paths and (target / paths[-1]).resolve().is_relative_to(root):
+            return False
+    git_bin = _real_git()
+    if git_bin is None or not target.is_dir():
+        return False
+    top = subprocess.run(
+        [git_bin, "rev-parse", "--show-toplevel"],
+        cwd=target,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "CWM_GIT_HOOK_DEPTH": "1"},
+    )
+    if top.returncode != 0:
+        return False
+    return not Path(top.stdout.strip()).resolve().is_relative_to(root)
+
+
+def _real_git() -> str | None:
+    """The first 'git' on PATH that is not a CWM '.cwm/bin' interceptor."""
+    for entry in os.environ.get("PATH", "").split(os.pathsep):
+        if not entry:
+            continue
+        d = Path(entry).resolve()
+        if d.name == "bin" and d.parent.name == ".cwm":
+            continue
+        candidate = d / "git"
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate)
+    return None
+
+
+def _passthrough_to_real_git(ctx: click.Context, args: list[str]) -> NoReturn:
+    git_bin = _real_git()
+    if git_bin is None:
+        _hook_msg("real git binary not found in PATH", fg="red")
+        ctx.exit(127)
+    env = {**os.environ, "CWM_GIT_HOOK_DEPTH": "1"}
+    ctx.exit(subprocess.run([git_bin, *args], env=env).returncode)
+
+
 def _repo_from_cwd(config: Config, manager: WorktreeStateManager) -> str | None:
     """Return the repository (relative to src/) whose checkout contains the cwd.
 
@@ -606,6 +690,10 @@ def git_hook(ctx: click.Context) -> None:
     # past to real git.  Skip any leading global options and refuse the ones
     # that retarget a different repository.
     args, retargeting = _strip_git_globals(list(ctx.args))
+    # The fast path strips a bare leading 'worktree'; rebuild the full argv.
+    full_args = list(ctx.args) if args[:1] == ["worktree"] else ["worktree", *ctx.args]
+    if _outside_project(full_args):
+        _passthrough_to_real_git(ctx, full_args)
     if retargeting:
         _hook_retarget_unsupported(ctx)
     if args and args[0] == "worktree":
