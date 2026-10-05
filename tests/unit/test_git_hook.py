@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -282,7 +283,7 @@ class TestHookGlobalOptions:
     ) -> None:
         link = tmp_path / "feature-x"
         result = _invoke_hook(
-            project, ["-C", "/elsewhere", "worktree", "add", "-b", "feature-x", str(link)], monkeypatch
+            project, ["-C", "src/my_repo", "worktree", "add", "-b", "feature-x", str(link)], monkeypatch
         )
         assert result.exit_code == 1
         assert "not supported under CWM" in result.stderr
@@ -291,7 +292,7 @@ class TestHookGlobalOptions:
         assert not link.exists()
 
     def test_git_dir_equals_form_is_refused(self, project: Config, monkeypatch) -> None:
-        result = _invoke_hook(project, ["--git-dir=/x", "worktree", "list"], monkeypatch)
+        result = _invoke_hook(project, ["--git-dir=src/my_repo/.git", "worktree", "list"], monkeypatch)
         assert result.exit_code == 1
         assert "not supported under CWM" in result.stderr
 
@@ -373,3 +374,60 @@ class TestHookRemovePathNormalisation:
         )
         assert result.exit_code == 0, (result.stdout, result.stderr)
         assert not link.is_symlink()
+
+
+class TestHookOutsideProject:
+    """'git worktree' aimed at a repository outside the project reaches real git.
+
+    The PATH shim from 'cwm activate' sees every git call made from the
+    activated shell, e.g. another tool creating a worktree of a parent repo.
+    """
+
+    @pytest.fixture
+    def outside(self, tmp_path: Path) -> Path:
+        repo = tmp_path / "outside"
+        make_git_repo(repo)
+        return repo
+
+    def test_add_from_outside_cwd_runs_real_git(
+        self, project: Config, outside: Path, tmp_path: Path, monkeypatch
+    ) -> None:
+        monkeypatch.setenv("CWM_PROJECT_ROOT", str(project.project_root))
+        monkeypatch.chdir(outside)
+        target = tmp_path / "outside-wt"
+        result = CliRunner().invoke(
+            cli, ["worktree", "__git_hook", "add", "-q", "-b", "other", str(target)], catch_exceptions=False
+        )
+        assert result.exit_code == 0, result.stderr
+        assert (target / ".git").is_file()
+        assert "[CWM Agent Hook]" not in result.stderr
+        assert not project.worktree_ws_path("other").exists()
+
+    def test_dash_c_to_outside_runs_real_git(
+        self, project: Config, outside: Path, tmp_path: Path, monkeypatch
+    ) -> None:
+        target = tmp_path / "outside-wt2"
+        result = _invoke_hook(
+            project, ["-C", str(outside), "worktree", "add", "-q", "-b", "other2", str(target)], monkeypatch
+        )
+        assert result.exit_code == 0, result.stderr
+        assert (target / ".git").is_file()
+        assert not project.worktree_ws_path("other2").exists()
+
+    def test_real_git_skips_cwm_shim_dir(self, project: Config, tmp_path: Path, monkeypatch) -> None:
+        from cwm.cli.worktree_cmd import _real_git
+
+        shim_dir = project.cwm_dir / "bin"
+        shim_dir.mkdir(exist_ok=True)
+        (shim_dir / "git").write_text("#!/bin/sh\nexit 99\n")
+        (shim_dir / "git").chmod(0o755)
+        monkeypatch.setenv("PATH", f"{shim_dir}:{os.environ['PATH']}")
+        found = _real_git()
+        assert found is not None and Path(found).parent != shim_dir
+
+    def test_inside_project_still_intercepted(self, project: Config, outside: Path, monkeypatch) -> None:
+        monkeypatch.setenv("CWM_PROJECT_ROOT", str(project.project_root))
+        monkeypatch.chdir(project.base_src_path / "my_repo")
+        result = CliRunner().invoke(cli, ["worktree", "__git_hook", "list"], catch_exceptions=False)
+        assert result.exit_code == 0
+        assert "my_repo" in result.stdout

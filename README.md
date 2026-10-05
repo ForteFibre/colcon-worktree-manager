@@ -265,6 +265,15 @@ project, the default set is used.
 The symlink path is recorded in the worktree metadata and removed automatically
 by `cwm worktree remove`.
 
+Calls that belong to another repository are not intercepted: when the target
+directory (the current directory, or the one selected with `-C`) is inside a
+git repository outside the CWM project, the hook runs real git unchanged. This
+keeps an activated shell from hijacking, for example, a parent repository that
+contains the CWM project, or a coding agent creating its own worktree of that
+repository. `git worktree remove <path>` still goes to CWM when `<path>`
+resolves into the project (an agent symlink), and a target that is not in any
+git repository is handled by CWM as before.
+
 ### ROS_DOMAIN_ID per worktree
 
 `cwm worktree add` leases the lowest free ID from `domain_id_pool` in
