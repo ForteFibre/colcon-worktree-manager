@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 
 import click
 
@@ -56,11 +57,17 @@ def env(branch: str) -> None:
         }
         # Same lazy lease as 'cwm activate', so tools that build the
         # environment from this output get the identical ROS_DOMAIN_ID.
-        from cwm.cli.activate_cmd import _lease_domain_id  # avoid import cycle via cli.main
+        from cwm.cli.activate_cmd import (  # avoid import cycle via cli.main
+            _lease_domain_id,
+            cyclonedds_uri_with_loopback,
+        )
         ros_domain_id = _lease_domain_id(WorktreeStateManager(config), branch)
         if ros_domain_id is not None:
             result["ROS_DOMAIN_ID"] = str(ros_domain_id)
             result["ROS_AUTOMATIC_DISCOVERY_RANGE"] = "LOCALHOST"
+            result["CYCLONEDDS_URI"] = cyclonedds_uri_with_loopback(
+                os.environ.get("CYCLONEDDS_URI")
+            )
         result["source_scripts"] = source_scripts
 
         click.echo(json.dumps(result))

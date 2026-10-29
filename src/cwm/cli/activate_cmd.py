@@ -38,7 +38,28 @@ _SNAPSHOT_VARS = (
     "ROS_LOCALHOST_ONLY",
     "ROS_DOMAIN_ID",
     "ROS_AUTOMATIC_DISCOVERY_RANGE",
+    "CYCLONEDDS_URI",
 )
+
+# CycloneDDS configuration fragment appended to CYCLONEDDS_URI alongside
+# ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST.  rmw_cyclonedds only adds localhost
+# as a static peer and disables multicast for LOCALHOST; it leaves interface
+# selection to CycloneDDS, which prefers a LAN interface and binds its
+# transmit socket to that address.  Under WSL2 mirrored networking, 127.0.0.1
+# traffic is policy-routed through loopback0 to Windows and only packets
+# sourced from 127.0.0.1 come back, so SPDP from the LAN address never reaches
+# the peer.  Pinning the interface to loopback keeps LOCALHOST working there
+# and is harmless elsewhere, since LOCALHOST only talks to this host anyway.
+CYCLONEDDS_LOOPBACK_FRAGMENT = (
+    '<General><Interfaces><NetworkInterface address="127.0.0.1"/></Interfaces></General>'
+)
+
+
+def cyclonedds_uri_with_loopback(current: str | None) -> str:
+    """Return *current* CYCLONEDDS_URI with the loopback fragment appended."""
+    if current:
+        return f"{current},{CYCLONEDDS_LOOPBACK_FRAGMENT}"
+    return CYCLONEDDS_LOOPBACK_FRAGMENT
 
 _TTY_HINT = """\
 cwm activate requires shell integration to mutate the current shell.
@@ -105,9 +126,12 @@ def _activation_core(
     q_overlay_install = shlex.quote(overlay_install)
 
     if ros_domain_id is not None:
+        q_fragment = shlex.quote(CYCLONEDDS_LOOPBACK_FRAGMENT)
         domain_block = (
             f"export ROS_DOMAIN_ID={int(ros_domain_id)}\n"
-            "export ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST"
+            "export ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST\n"
+            "# Pin CycloneDDS to loopback (see CYCLONEDDS_LOOPBACK_FRAGMENT).\n"
+            f'export CYCLONEDDS_URI="${{CYCLONEDDS_URI:+${{CYCLONEDDS_URI}},}}"{q_fragment}'
         )
     else:
         domain_block = "# No ROS_DOMAIN_ID leased for this worktree."

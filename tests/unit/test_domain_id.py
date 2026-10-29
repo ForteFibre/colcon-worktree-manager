@@ -15,7 +15,7 @@ import pytest
 import yaml
 from click.testing import CliRunner
 
-from cwm.cli.activate_cmd import generate_activate_script
+from cwm.cli.activate_cmd import CYCLONEDDS_LOOPBACK_FRAGMENT, generate_activate_script
 from cwm.cli.main import cli
 from cwm.core.config import DEFAULT_DOMAIN_ID_POOL, Config
 from cwm.core.worktree_state import WorktreeMeta, WorktreeStateManager
@@ -189,6 +189,39 @@ class TestActivateOutput:
         assert "IN=215/LOCALHOST" in out
         assert "OUT=7/unset" in out
 
+    @pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
+    @pytest.mark.parametrize(
+        ("previous", "expected_in"),
+        [
+            (None, CYCLONEDDS_LOOPBACK_FRAGMENT),
+            ("file:///home/u/cyclonedds.xml", f"file:///home/u/cyclonedds.xml,{CYCLONEDDS_LOOPBACK_FRAGMENT}"),
+        ],
+    )
+    def test_bash_pins_cyclonedds_to_loopback(
+        self, project: Config, monkeypatch, previous: str | None, expected_in: str
+    ) -> None:
+        WorktreeStateManager(project).create_worktree("feat")
+        script = self._activate(project, monkeypatch, "feat")
+        script_path = project.project_root / "activate.bash"
+        script_path.write_text(script)
+
+        env = {k: v for k, v in os.environ.items() if not k.startswith(("CWM_", "_CWM_"))}
+        env.pop("CYCLONEDDS_URI", None)
+        if previous is not None:
+            env["CYCLONEDDS_URI"] = previous
+        out = subprocess.run(
+            [
+                "bash", "--noprofile", "--norc", "-c",
+                f'source {script_path} >/dev/null; '
+                'echo "IN=$CYCLONEDDS_URI"; '
+                'deactivate; '
+                'echo "OUT=${CYCLONEDDS_URI-unset}"',
+            ],
+            env=env, capture_output=True, text=True, check=True,
+        ).stdout
+        assert f"IN={expected_in}\n" in out
+        assert f"OUT={previous if previous is not None else 'unset'}\n" in out
+
     def test_generate_without_domain_id_has_no_export(self) -> None:
         script = generate_activate_script(
             branch="b", project_root="/p", workspace="/p/w", underlay="/u",
@@ -196,6 +229,7 @@ class TestActivateOutput:
         )
         assert not re.search(r"^export ROS_DOMAIN_ID=\d", script, re.MULTILINE)
         assert "No ROS_DOMAIN_ID leased" in script
+        assert "NetworkInterface" not in script
 
 
 class TestReporting:
@@ -206,9 +240,13 @@ class TestReporting:
 
     def test_inspect_env_includes_domain(self, project: Config, monkeypatch) -> None:
         WorktreeStateManager(project).create_worktree("feat")
+        monkeypatch.setenv("CYCLONEDDS_URI", "file:///home/u/cyclonedds.xml")
         payload = json.loads(self._cli(project, monkeypatch, "inspect", "env", "feat").output)
         assert payload["ROS_DOMAIN_ID"] == "215"
         assert payload["ROS_AUTOMATIC_DISCOVERY_RANGE"] == "LOCALHOST"
+        assert payload["CYCLONEDDS_URI"] == (
+            f"file:///home/u/cyclonedds.xml,{CYCLONEDDS_LOOPBACK_FRAGMENT}"
+        )
 
     def test_list_and_status_show_domain(self, project: Config, monkeypatch) -> None:
         WorktreeStateManager(project).create_worktree("feat")
