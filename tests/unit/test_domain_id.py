@@ -15,7 +15,12 @@ import pytest
 import yaml
 from click.testing import CliRunner
 
-from cwm.cli.activate_cmd import generate_activate_script
+from cwm.cli.activate_cmd import (
+    CYCLONEDDS_LOOPBACK_FRAGMENT,
+    cyclonedds_uri_with_loopback,
+    generate_activate_script,
+    pre_activation_cyclonedds_uri,
+)
 from cwm.cli.main import cli
 from cwm.core.config import DEFAULT_DOMAIN_ID_POOL, Config
 from cwm.core.worktree_state import WorktreeMeta, WorktreeStateManager
@@ -189,6 +194,55 @@ class TestActivateOutput:
         assert "IN=215/LOCALHOST" in out
         assert "OUT=7/unset" in out
 
+    @pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
+    @pytest.mark.parametrize(
+        ("previous", "expected_in"),
+        [
+            (None, CYCLONEDDS_LOOPBACK_FRAGMENT),
+            ("file:///home/u/cyclonedds.xml", f"file:///home/u/cyclonedds.xml,{CYCLONEDDS_LOOPBACK_FRAGMENT}"),
+        ],
+    )
+    def test_bash_pins_cyclonedds_to_loopback(
+        self, project: Config, monkeypatch, previous: str | None, expected_in: str
+    ) -> None:
+        # The value is computed when the script is rendered, from the caller's
+        # environment, so render it with the same CYCLONEDDS_URI the shell has.
+        monkeypatch.delenv("CWM_ACTIVE", raising=False)
+        if previous is None:
+            monkeypatch.delenv("CYCLONEDDS_URI", raising=False)
+        else:
+            monkeypatch.setenv("CYCLONEDDS_URI", previous)
+        WorktreeStateManager(project).create_worktree("feat")
+        script = self._activate(project, monkeypatch, "feat")
+        script_path = project.project_root / "activate.bash"
+        script_path.write_text(script)
+
+        env = {k: v for k, v in os.environ.items() if not k.startswith(("CWM_", "_CWM_"))}
+        out = subprocess.run(
+            [
+                "bash", "--noprofile", "--norc", "-c",
+                f'source {script_path} >/dev/null; '
+                'echo "IN=$CYCLONEDDS_URI"; '
+                'deactivate; '
+                'echo "OUT=${CYCLONEDDS_URI-unset}"',
+            ],
+            env=env, capture_output=True, text=True, check=True,
+        ).stdout
+        assert f"IN={expected_in}\n" in out
+        assert f"OUT={previous if previous is not None else 'unset'}\n" in out
+
+    def test_script_leaves_uri_that_selects_interface(
+        self, project: Config, monkeypatch, tmp_path: Path
+    ) -> None:
+        config = tmp_path / "cyclonedds.xml"
+        config.write_text('<General><Interfaces><NetworkInterface name="eth0"/></Interfaces></General>')
+        monkeypatch.setenv("CYCLONEDDS_URI", f"file://{config}")
+        monkeypatch.delenv("CWM_ACTIVE", raising=False)
+        WorktreeStateManager(project).create_worktree("feat")
+        script = self._activate(project, monkeypatch, "feat")
+        assert "export ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST" in script
+        assert 'NetworkInterface address="127.0.0.1"' not in script
+
     def test_generate_without_domain_id_has_no_export(self) -> None:
         script = generate_activate_script(
             branch="b", project_root="/p", workspace="/p/w", underlay="/u",
@@ -196,6 +250,7 @@ class TestActivateOutput:
         )
         assert not re.search(r"^export ROS_DOMAIN_ID=\d", script, re.MULTILINE)
         assert "No ROS_DOMAIN_ID leased" in script
+        assert "NetworkInterface" not in script
 
 
 class TestReporting:
@@ -206,9 +261,27 @@ class TestReporting:
 
     def test_inspect_env_includes_domain(self, project: Config, monkeypatch) -> None:
         WorktreeStateManager(project).create_worktree("feat")
+        monkeypatch.setenv("CYCLONEDDS_URI", "file:///home/u/cyclonedds.xml")
         payload = json.loads(self._cli(project, monkeypatch, "inspect", "env", "feat").output)
         assert payload["ROS_DOMAIN_ID"] == "215"
         assert payload["ROS_AUTOMATIC_DISCOVERY_RANGE"] == "LOCALHOST"
+        assert payload["CYCLONEDDS_URI"] == (
+            f"file:///home/u/cyclonedds.xml,{CYCLONEDDS_LOOPBACK_FRAGMENT}"
+        )
+
+    def test_inspect_env_from_activated_shell_does_not_duplicate(
+        self, project: Config, monkeypatch
+    ) -> None:
+        WorktreeStateManager(project).create_worktree("feat")
+        monkeypatch.setenv("CWM_ACTIVE", "1")
+        monkeypatch.setenv("_CWM_OLD_CYCLONEDDS_URI", "file:///home/u/cyclonedds.xml")
+        monkeypatch.setenv(
+            "CYCLONEDDS_URI", f"file:///home/u/cyclonedds.xml,{CYCLONEDDS_LOOPBACK_FRAGMENT}"
+        )
+        payload = json.loads(self._cli(project, monkeypatch, "inspect", "env", "feat").output)
+        assert payload["CYCLONEDDS_URI"] == (
+            f"file:///home/u/cyclonedds.xml,{CYCLONEDDS_LOOPBACK_FRAGMENT}"
+        )
 
     def test_list_and_status_show_domain(self, project: Config, monkeypatch) -> None:
         WorktreeStateManager(project).create_worktree("feat")
@@ -223,3 +296,49 @@ class TestReporting:
     def test_add_json_reports_domain(self, project: Config, monkeypatch) -> None:
         payload = json.loads(self._cli(project, monkeypatch, "worktree", "add", "feat", "--json").output)
         assert payload["ros_domain_id"] == 215
+
+
+class TestCycloneDdsUri:
+    @pytest.mark.parametrize("current", [None, "", ","])
+    def test_unset_or_empty_gives_fragment_only(self, current: str | None) -> None:
+        assert cyclonedds_uri_with_loopback(current) == CYCLONEDDS_LOOPBACK_FRAGMENT
+
+    def test_keeps_previous_entries(self, tmp_path: Path) -> None:
+        config = tmp_path / "cyclonedds.xml"
+        config.write_text("<Discovery><MaxAutoParticipantIndex>120</MaxAutoParticipantIndex></Discovery>")
+        assert cyclonedds_uri_with_loopback(f"file://{config}") == (
+            f"file://{config},{CYCLONEDDS_LOOPBACK_FRAGMENT}"
+        )
+
+    def test_missing_file_is_kept_and_pinned(self) -> None:
+        assert cyclonedds_uri_with_loopback("file:///nonexistent/cyclonedds.xml") == (
+            f"file:///nonexistent/cyclonedds.xml,{CYCLONEDDS_LOOPBACK_FRAGMENT}"
+        )
+
+    @pytest.mark.parametrize(
+        "current",
+        [
+            CYCLONEDDS_LOOPBACK_FRAGMENT,
+            f"file:///home/u/cyclonedds.xml,{CYCLONEDDS_LOOPBACK_FRAGMENT}",
+            '<General><Interfaces><NetworkInterface name="eth0"/></Interfaces></General>',
+        ],
+    )
+    def test_inline_interface_selection_is_left_alone(self, current: str) -> None:
+        assert cyclonedds_uri_with_loopback(current) is None
+
+    def test_file_with_legacy_interface_address_is_left_alone(self, tmp_path: Path) -> None:
+        config = tmp_path / "cyclonedds.xml"
+        config.write_text("<General><NetworkInterfaceAddress>eth0</NetworkInterfaceAddress></General>")
+        assert cyclonedds_uri_with_loopback(f"file://{config}") is None
+
+    def test_pre_activation_value(self) -> None:
+        pinned = f"file:///a.xml,{CYCLONEDDS_LOOPBACK_FRAGMENT}"
+        assert pre_activation_cyclonedds_uri({"CYCLONEDDS_URI": "file:///a.xml"}) == "file:///a.xml"
+        assert pre_activation_cyclonedds_uri({}) is None
+        assert pre_activation_cyclonedds_uri(
+            {"CWM_ACTIVE": "1", "CYCLONEDDS_URI": pinned, "_CWM_OLD_CYCLONEDDS_URI": "file:///a.xml"}
+        ) == "file:///a.xml"
+        assert pre_activation_cyclonedds_uri(
+            {"CWM_ACTIVE": "1", "CYCLONEDDS_URI": CYCLONEDDS_LOOPBACK_FRAGMENT,
+             "_CWM_WAS_UNSET_CYCLONEDDS_URI": "1"}
+        ) is None

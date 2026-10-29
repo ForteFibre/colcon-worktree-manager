@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 
 import click
 
@@ -20,8 +21,9 @@ def env(branch: str) -> None:
     """Show the environment variables for the BRANCH worktree.
 
     Outputs the CWM environment markers, the worktree's ROS_DOMAIN_ID (leased
-    lazily if missing) and the setup scripts that should be sourced to
-    establish the ROS 2 overlay environment.
+    lazily if missing) with its discovery settings (including the loopback
+    CYCLONEDDS_URI that 'cwm activate' exports) and the setup scripts that
+    should be sourced to establish the ROS 2 overlay environment.
     """
     try:
         root = find_project_root()
@@ -56,11 +58,22 @@ def env(branch: str) -> None:
         }
         # Same lazy lease as 'cwm activate', so tools that build the
         # environment from this output get the identical ROS_DOMAIN_ID.
-        from cwm.cli.activate_cmd import _lease_domain_id  # avoid import cycle via cli.main
+        from cwm.cli.activate_cmd import (  # avoid import cycle via cli.main
+            _lease_domain_id,
+            cyclonedds_uri_with_loopback,
+            pre_activation_cyclonedds_uri,
+        )
         ros_domain_id = _lease_domain_id(WorktreeStateManager(config), branch)
         if ros_domain_id is not None:
             result["ROS_DOMAIN_ID"] = str(ros_domain_id)
             result["ROS_AUTOMATIC_DISCOVERY_RANGE"] = "LOCALHOST"
+            # Same value 'cwm activate' exports; omitted when the user's
+            # CYCLONEDDS_URI already selects an interface.
+            cyclonedds_uri = cyclonedds_uri_with_loopback(
+                pre_activation_cyclonedds_uri(os.environ)
+            )
+            if cyclonedds_uri is not None:
+                result["CYCLONEDDS_URI"] = cyclonedds_uri
         result["source_scripts"] = source_scripts
 
         click.echo(json.dumps(result))
