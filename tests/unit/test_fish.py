@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 from click.testing import CliRunner
 
-from cwm.cli.activate_cmd import generate_fish_activate_script
+from cwm.cli.activate_cmd import CYCLONEDDS_LOOPBACK_FRAGMENT, generate_fish_activate_script
 from cwm.cli.main import cli
 from cwm.core.config import Config
 from cwm.core.worktree_state import WorktreeStateManager
@@ -205,7 +205,9 @@ class TestActivateShellFish:
         monkeypatch.delenv("CWM_ACTIVE", raising=False)
         env = _clean_env(TO_BE_REMOVED="bye", ROS_DOMAIN_ID="3")
         env.pop("ROS_AUTOMATIC_DISCOVERY_RANGE", None)
+        env.pop("CYCLONEDDS_URI", None)
         env.pop("TRICKY", None)
+        monkeypatch.delenv("CYCLONEDDS_URI", raising=False)
         for key, value in env.items():
             monkeypatch.setenv(key, value)
         script = _fish_activate(project, monkeypatch).stdout
@@ -221,11 +223,13 @@ echo "in:$ROS_DOMAIN_ID:$ROS_AUTOMATIC_DISCOVERY_RANGE:$CWM_WORKTREE:$TRICKY"
 set -q TO_BE_REMOVED; or echo in:removed
 echo "in:path0:$PATH[1]"
 echo "in:root:$CWM_PROJECT_ROOT"
+echo "in:cyclonedds:$CYCLONEDDS_URI"
 echo "in:prompt:"(fish_prompt)
 bash -c 'echo "child:$ROS_DOMAIN_ID"'
 deactivate
 echo "out:$ROS_DOMAIN_ID:$TO_BE_REMOVED"
 set -q ROS_AUTOMATIC_DISCOVERY_RANGE; or echo out:range-unset
+set -q CYCLONEDDS_URI; or echo out:cyclonedds-unset
 set -q CWM_WORKTREE; or echo out:worktree-unset
 set -q TRICKY; or echo out:tricky-unset
 test (string join : $PATH) = (string join : $before_path); and echo out:path-restored
@@ -238,6 +242,7 @@ set -q _CWM_FISH_VARS; or echo out:no-bookkeeping
         ).stdout.splitlines()
 
         assert f"in:root:{project.project_root}" in out
+        assert f"in:cyclonedds:{CYCLONEDDS_LOOPBACK_FRAGMENT}" in out
 
         assert "in:215:LOCALHOST:feat:it's a \"quoted\" value" in out
         assert "in:removed" in out
@@ -245,7 +250,7 @@ set -q _CWM_FISH_VARS; or echo out:no-bookkeeping
         assert "in:prompt:[cwm:feat] > " in out
         assert "child:215" in out
         assert "out:3:bye" in out
-        for marker in ("range-unset", "worktree-unset", "tricky-unset", "path-restored",
+        for marker in ("range-unset", "cyclonedds-unset", "worktree-unset", "tricky-unset", "path-restored",
                        "deactivate-gone", "no-bookkeeping"):
             assert f"out:{marker}" in out, (marker, out)
         assert "out:prompt:> " in out

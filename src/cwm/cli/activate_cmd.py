@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import shlex
 import sys
+from collections.abc import Mapping
 from pathlib import Path
 
 import click
@@ -55,11 +56,49 @@ CYCLONEDDS_LOOPBACK_FRAGMENT = (
 )
 
 
-def cyclonedds_uri_with_loopback(current: str | None) -> str:
-    """Return *current* CYCLONEDDS_URI with the loopback fragment appended."""
-    if current:
-        return f"{current},{CYCLONEDDS_LOOPBACK_FRAGMENT}"
-    return CYCLONEDDS_LOOPBACK_FRAGMENT
+def _selects_interface(entry: str) -> bool:
+    """Return whether one CYCLONEDDS_URI entry already chooses a network interface.
+
+    *entry* is inline XML or a ``file://`` URI.  ``NetworkInterface`` matches
+    both ``General/Interfaces/NetworkInterface`` and the legacy
+    ``General/NetworkInterfaceAddress``; CycloneDDS rejects a second
+    interface selection (duplicate or mixed), so such configs are left alone.
+    """
+    text = entry.strip()
+    if text.startswith("file://"):
+        try:
+            text = Path(text[len("file://"):]).read_text()
+        except OSError:
+            return False
+    return "NetworkInterface" in text
+
+
+def pre_activation_cyclonedds_uri(environ: Mapping[str, str]) -> str | None:
+    """Return CYCLONEDDS_URI as it was before any CWM activation in *environ*.
+
+    The bash activation script deactivates a previous worktree before applying
+    itself, so when rendered from an activated shell it must start from the
+    value that activation snapshotted, not the one it exported.
+    """
+    if environ.get("CWM_ACTIVE"):
+        if "_CWM_WAS_UNSET_CYCLONEDDS_URI" in environ:
+            return None
+        if "_CWM_OLD_CYCLONEDDS_URI" in environ:
+            return environ["_CWM_OLD_CYCLONEDDS_URI"]
+    return environ.get("CYCLONEDDS_URI")
+
+
+def cyclonedds_uri_with_loopback(current: str | None) -> str | None:
+    """Return the CYCLONEDDS_URI to export with LOCALHOST discovery.
+
+    Appends :data:`CYCLONEDDS_LOOPBACK_FRAGMENT` to *current*.  Returns None
+    (leave CYCLONEDDS_URI untouched) when *current* already selects an
+    interface, which includes a *current* that already holds the fragment.
+    """
+    entries = [entry for entry in (current or "").split(",") if entry.strip()]
+    if any(_selects_interface(entry) for entry in entries):
+        return None
+    return ",".join([*entries, CYCLONEDDS_LOOPBACK_FRAGMENT])
 
 _TTY_HINT = """\
 cwm activate requires shell integration to mutate the current shell.
@@ -107,6 +146,7 @@ def _activation_core(
     overlay_install: str,
     ros_domain_id: int | None,
     overlay_fp: str = NO_OVERLAY,
+    cyclonedds_uri: str | None = None,
 ) -> str:
     """Return the bash statements that establish a worktree's environment.
 
@@ -115,6 +155,8 @@ def _activation_core(
     *overlay_fp* is the overlay's fingerprint (see
     :func:`cwm.core.overlay_state.overlay_fingerprint`) recorded so that
     ``cwm ws build`` can tell whether the shell must re-activate.
+    *cyclonedds_uri*, when given with *ros_domain_id*, is exported as
+    CYCLONEDDS_URI (see :func:`cyclonedds_uri_with_loopback`).
     Shared by the bash activation script and the fish activation, which runs
     it in a bash subprocess and translates the resulting environment diff.
     """
@@ -126,13 +168,15 @@ def _activation_core(
     q_overlay_install = shlex.quote(overlay_install)
 
     if ros_domain_id is not None:
-        q_fragment = shlex.quote(CYCLONEDDS_LOOPBACK_FRAGMENT)
         domain_block = (
             f"export ROS_DOMAIN_ID={int(ros_domain_id)}\n"
-            "export ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST\n"
-            "# Pin CycloneDDS to loopback (see CYCLONEDDS_LOOPBACK_FRAGMENT).\n"
-            f'export CYCLONEDDS_URI="${{CYCLONEDDS_URI:+${{CYCLONEDDS_URI}},}}"{q_fragment}'
+            "export ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST"
         )
+        if cyclonedds_uri is not None:
+            domain_block += (
+                "\n# Pin CycloneDDS to loopback (see CYCLONEDDS_LOOPBACK_FRAGMENT).\n"
+                f"export CYCLONEDDS_URI={shlex.quote(cyclonedds_uri)}"
+            )
     else:
         domain_block = "# No ROS_DOMAIN_ID leased for this worktree."
 
@@ -177,6 +221,7 @@ def generate_activate_script(
     overlay_install: str,
     ros_domain_id: int | None = None,
     overlay_fp: str = NO_OVERLAY,
+    cyclonedds_uri: str | None = None,
 ) -> str:
     """Return a bash activation script for the given worktree.
 
@@ -184,7 +229,8 @@ def generate_activate_script(
 
     *ros_domain_id* is the worktree's leased ROS_DOMAIN_ID; when given, it is
     exported together with ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST so nodes
-    from different worktrees (and other hosts) stay isolated.
+    from different worktrees (and other hosts) stay isolated, and
+    *cyclonedds_uri* (if not None) as CYCLONEDDS_URI.
     """
     q_branch = shlex.quote(branch)
     q_workspace = shlex.quote(workspace)
@@ -225,6 +271,7 @@ def generate_activate_script(
         overlay_install=overlay_install,
         ros_domain_id=ros_domain_id,
         overlay_fp=overlay_fp,
+        cyclonedds_uri=cyclonedds_uri,
     )
     domain_echo = (
         f'echo "  ROS_DOMAIN_ID: {int(ros_domain_id)} (discovery: LOCALHOST)"\n'
@@ -488,8 +535,10 @@ def activate(branch: str | None, shell: str) -> None:
 
     The script sets CWM_ACTIVE, CWM_PROJECT_ROOT, CWM_WORKTREE, CWM_WORKSPACE,
     sources the ROS 2 underlay and workspace overlays, exports the worktree's
-    leased ROS_DOMAIN_ID with ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST, and
-    defines a 'deactivate' shell function to undo all changes.  It also
+    leased ROS_DOMAIN_ID with ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST (and a
+    CYCLONEDDS_URI that pins CycloneDDS to loopback, unless the existing one
+    already selects an interface), and defines a 'deactivate' shell function
+    to undo all changes.  It also
     records the overlay's fingerprint in CWM_OVERLAY_FP so that 'cwm ws build'
     can detect when the overlay gained packages after activation (the shell
     integration then re-activates automatically; otherwise a hint is printed).
@@ -545,6 +594,10 @@ def activate(branch: str | None, shell: str) -> None:
             overlay_install=str(overlay_install),
             ros_domain_id=ros_domain_id,
             overlay_fp=overlay_fingerprint(overlay_install),
+            cyclonedds_uri=(
+                cyclonedds_uri_with_loopback(pre_activation_cyclonedds_uri(os.environ))
+                if ros_domain_id is not None else None
+            ),
         )
 
         if shell == "fish":

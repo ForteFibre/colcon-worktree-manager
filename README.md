@@ -284,9 +284,22 @@ worktree metadata; `cwm worktree remove` releases it. `cwm activate` (and
 ```bash
 ROS_DOMAIN_ID=<leased id>
 ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST
+CYCLONEDDS_URI=<previous value,>'<General><Interfaces><NetworkInterface address="127.0.0.1"/></Interfaces></General>'
 ```
 
-and `deactivate` restores the previous values. The default pool is chosen
+and `deactivate` restores the previous values.
+
+`CYCLONEDDS_URI` pins CycloneDDS to loopback. For `LOCALHOST`, rmw_cyclonedds
+only adds localhost as a static peer and disables multicast; CycloneDDS still
+picks a LAN interface and sends from its address. Under WSL2 mirrored
+networking, 127.0.0.1 traffic is policy-routed (`ip rule` → table 127) through
+`loopback0` to Windows, and only packets sourced from 127.0.0.1 come back, so
+nodes in a worktree never discover each other without the pin. Elsewhere the
+pin changes nothing, because `LOCALHOST` only talks to this host. Any previous
+`CYCLONEDDS_URI` is kept in front of the fragment. If it already selects an
+interface (inline XML or a `file://` config containing `NetworkInterface`),
+CWM leaves `CYCLONEDDS_URI` unchanged, since CycloneDDS refuses a second
+interface selection. Other RMW implementations ignore the variable. The default pool is chosen
 because Linux-safe domain IDs are 0–101 and 215–232, and `ament_cmake_ros`'s
 domain coordinator (used by isolated launch tests) hands out 1–100. Worktrees
 created before leasing existed get an ID lazily on their next activation.
